@@ -143,7 +143,7 @@ fun FileBrowser() {
                         Text(
                             current.absolutePath,
                             maxLines = 1,
-                            overflow = TextOverflow.StartEllipsis,
+                            overflow = TextOverflow.Ellipsis,
                             style = MaterialTheme.typography.titleMedium
                         )
                     },
