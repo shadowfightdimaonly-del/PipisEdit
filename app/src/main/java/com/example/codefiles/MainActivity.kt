@@ -17,17 +17,22 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Description
@@ -43,8 +48,8 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -52,21 +57,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import java.io.File
 import java.util.zip.ZipFile
-import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.TopAppBarDefaults
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 
 val Purple = Color(0xFF9C4DFF)
 val PurpleLight = Color(0xFFD0B0FF)
@@ -106,8 +104,8 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-                       MaterialTheme(colorScheme = AppColors) {
-                Surface(modifier = Modifier.fillMaxSize()) {
+            MaterialTheme(colorScheme = AppColors) {
+                Surface(modifier = Modifier.fillMaxSize(), color = Color.Black) {
                     if (hasAccess) {
                         FileBrowser()
                     } else {
@@ -252,6 +250,7 @@ fun FileBrowser() {
         }
 
         Scaffold(
+            containerColor = Color.Black,
             topBar = {
                 TopAppBar(
                     title = {
@@ -265,17 +264,18 @@ fun FileBrowser() {
                     navigationIcon = {
                         if (current != root) {
                             IconButton(onClick = { current = current.parentFile ?: root }) {
-                                                                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Назад")
+                                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Назад")
                             }
                         }
-                    }
-                                    },
+                    },
                     colors = TopAppBarDefaults.topAppBarColors(
                         containerColor = Color.Black,
                         titleContentColor = PurpleLight,
                         navigationIconContentColor = Purple
                     )
-                ) { padding ->
+                )
+            }
+        ) { padding ->
             if (entries.isEmpty()) {
                 Column(
                     modifier = Modifier.fillMaxSize().padding(padding),
@@ -343,20 +343,31 @@ fun FileBrowser() {
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun FileRow(file: File, onClick: () -> Unit, onLongClick: () -> Unit = {}) {
+    val shape = RoundedCornerShape(10.dp)
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .padding(horizontal = 10.dp, vertical = 4.dp)
+            .clip(shape)
+            .border(BorderStroke(1.dp, Purple), shape)
             .combinedClickable(onClick = onClick, onLongClick = onLongClick)
-            .padding(horizontal = 16.dp, vertical = 12.dp),
+            .padding(horizontal = 12.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Icon(
-            imageVector = if (file.isDirectory) Icons.Filled.Folder else Icons.Filled.Description,
-            contentDescription = null,
-            tint = if (file.isDirectory) MaterialTheme.colorScheme.primary
-            else MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        Column(modifier = Modifier.padding(start = 16.dp)) {
+        Box(
+            modifier = Modifier
+                .size(40.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(if (file.isDirectory) Purple else PurpleDark),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = if (file.isDirectory) Icons.Filled.Folder else Icons.Filled.Description,
+                contentDescription = null,
+                tint = if (file.isDirectory) Color.Black else PurpleLight
+            )
+        }
+        Column(modifier = Modifier.padding(start = 14.dp)) {
             Text(file.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
             if (file.isFile) {
                 Text(
