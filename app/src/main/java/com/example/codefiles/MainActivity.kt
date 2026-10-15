@@ -31,11 +31,14 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Folder
@@ -60,6 +63,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -84,7 +88,9 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
+import java.util.zip.ZipOutputStream
 
 val Purple = Color(0xFF9C4DFF)
 val PurpleLight = Color(0xFFD0B0FF)
@@ -104,6 +110,8 @@ val AppColors = darkColorScheme(
 
 val ARCHIVE_EXT = setOf("zip", "mcaddon", "mcpack", "mcworld", "mctemplate", "apk", "jar")
 
+val IMAGE_EXT = setOf("png", "jpg", "jpeg", "webp", "gif", "bmp")
+
 val TEXT_EXT = setOf(
     "txt", "md", "log", "csv", "json", "xml", "html", "htm", "css", "scss", "js", "ts",
     "tsx", "jsx", "kt", "kts", "java", "py", "sh", "bash", "yml", "yaml", "toml", "rb",
@@ -119,6 +127,25 @@ class Entry(
     val size: Long,
     val sub: String? = null
 )
+
+class PackJob(val dir: File, val ext: String, val errors: List<String>)
+
+object Bookmarks {
+    val list = mutableStateListOf<String>()
+
+    fun load(context: Context) {
+        val s = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+            .getString("bookmarks", "") ?: ""
+        list.clear()
+        list.addAll(s.split("\n").filter { it.isNotBlank() })
+    }
+
+    fun save(context: Context) {
+        context.getSharedPreferences("settings", Context.MODE_PRIVATE).edit()
+            .putString("bookmarks", list.joinToString("\n"))
+            .apply()
+    }
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -142,6 +169,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         Prefs.load(this)
+        Bookmarks.load(this)
         setContent {
             MaterialTheme(colorScheme = AppColors) {
                 Surface(modifier = Modifier.fillMaxSize(), color = Color.Black) {
@@ -228,6 +256,52 @@ fun unzipArchive(archive: File): File? {
     } catch (e: Exception) {
         null
     }
+}
+
+/** Пакует содержимое папки в корень архива (manifest.json окажется в корне). */
+fun zipFolder(src: File, out: File): Boolean =
+    try {
+        ZipOutputStream(out.outputStream().buffered()).use { zos ->
+            val base = src.absolutePath
+            src.walkTopDown().forEach { f ->
+                if (f == src) return@forEach
+                if (f.name == ".DS_Store" || f.name == "Thumbs.db") return@forEach
+                val rel = f.absolutePath.removePrefix(base).trimStart('/')
+                if (f.isDirectory) {
+                    zos.putNextEntry(ZipEntry("$rel/"))
+                    zos.closeEntry()
+                } else {
+                    zos.putNextEntry(ZipEntry(rel))
+                    f.inputStream().use { it.copyTo(zos) }
+                    zos.closeEntry()
+                }
+            }
+        }
+        true
+    } catch (e: Throwable) {
+        out.delete()
+        false
+    }
+
+fun scanJsonErrors(dir: File): List<String> {
+    val out = ArrayList<String>()
+    val base = dir.absolutePath
+    for (f in dir.walkTopDown()) {
+        if (!f.isFile) continue
+        val ext = f.extension.lowercase()
+        if (ext != "json" && ext != "mcmeta") continue
+        if (f.length() > 3L * 1024 * 1024) continue
+        val err = try {
+            checkJson(f.readText())
+        } catch (e: Throwable) {
+            null
+        }
+        if (err != null) {
+            out.add(f.absolutePath.removePrefix(base).trimStart('/') + " — " + err)
+            if (out.size >= 50) break
+        }
+    }
+    return out
 }
 
 fun loadEntries(dir: File): List<Entry> =
@@ -318,6 +392,7 @@ fun FileBrowser() {
     val root = remember { Environment.getExternalStorageDirectory() }
     var current by remember { mutableStateOf(root) }
     var opened by remember { mutableStateOf<File?>(null) }
+    var image by remember { mutableStateOf<File?>(null) }
     var archive by remember { mutableStateOf<File?>(null) }
     var menuFor by remember { mutableStateOf<Entry?>(null) }
     var renameFor by remember { mutableStateOf<File?>(null) }
@@ -332,6 +407,9 @@ fun FileBrowser() {
     var entries by remember { mutableStateOf<List<Entry>>(emptyList()) }
     var loaded by remember { mutableStateOf(false) }
     var results by remember { mutableStateOf<List<Entry>>(emptyList()) }
+    var showBookmarks by remember { mutableStateOf(false) }
+    var packFor by remember { mutableStateOf<File?>(null) }
+    var packJob by remember { mutableStateOf<PackJob?>(null) }
 
     LaunchedEffect(current, refresh) {
         loaded = false
@@ -365,6 +443,21 @@ fun FileBrowser() {
         }
     }
 
+    fun doPack(dir: File, ext: String) {
+        runOp("Упаковка…", "Архив создан рядом с папкой", "Не удалось упаковать") {
+            val parent = dir.parentFile
+            if (parent == null) false else zipFolder(dir, uniqueTarget(parent, dir.name + "." + ext))
+        }
+    }
+
+    fun startPack(dir: File, ext: String) {
+        toast("Проверка JSON…")
+        scope.launch {
+            val errors = withContext(Dispatchers.IO) { scanJsonErrors(dir) }
+            if (errors.isEmpty()) doPack(dir, ext) else packJob = PackJob(dir, ext, errors)
+        }
+    }
+
     fun createItem(isDir: Boolean) {
         val n = newName.trim()
         if (n.isEmpty() || n.contains('/')) {
@@ -387,9 +480,15 @@ fun FileBrowser() {
     }
 
     val file = opened
+    val img = image
     val arc = archive
     if (file != null) {
-        FileViewer(file = file, onBack = { opened = null })
+        FileViewer(file = file, onBack = {
+            opened = null
+            refresh++
+        })
+    } else if (img != null) {
+        ImageViewer(file = img, onBack = { image = null })
     } else if (arc != null) {
         ArchiveViewer(archive = arc, onBack = { archive = null })
     } else {
@@ -457,6 +556,9 @@ fun FileBrowser() {
                                 if (c.second) clip = null
                             }) { Text("Вставить", color = Purple) }
                         }
+                        IconButton(onClick = { showBookmarks = true }) {
+                            Icon(Icons.Filled.Bookmark, contentDescription = "Закладки")
+                        }
                         IconButton(onClick = {
                             if (searchOn) {
                                 searchOn = false
@@ -515,6 +617,8 @@ fun FileBrowser() {
                                     query = ""
                                 } else if (ext in ARCHIVE_EXT) {
                                     openWithSystem(context, e.file)
+                                } else if (ext in IMAGE_EXT) {
+                                    image = e.file
                                 } else if (ext in TEXT_EXT || ext.isEmpty()) {
                                     opened = e.file
                                 } else {
@@ -536,7 +640,7 @@ fun FileBrowser() {
                 onDismissRequest = { menuFor = null },
                 title = { Text(m.name, maxLines = 2, overflow = TextOverflow.Ellipsis) },
                 text = {
-                    Column {
+                    Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
                         if (isArchive) {
                             TextButton(onClick = {
                                 archive = m.file
@@ -548,6 +652,12 @@ fun FileBrowser() {
                                     unzipArchive(m.file) != null
                                 }
                             }) { Text("Распаковать") }
+                        }
+                        if (m.isDir) {
+                            TextButton(onClick = {
+                                packFor = m.file
+                                menuFor = null
+                            }) { Text("Запаковать…") }
                         }
                         if (!m.isDir) {
                             TextButton(onClick = {
@@ -578,6 +688,134 @@ fun FileBrowser() {
                 },
                 confirmButton = {},
                 dismissButton = { TextButton(onClick = { menuFor = null }) { Text("Отмена") } }
+            )
+        }
+
+        // Выбор формата упаковки
+        val pf = packFor
+        if (pf != null) {
+            AlertDialog(
+                onDismissRequest = { packFor = null },
+                title = { Text("Запаковать «" + pf.name + "»", maxLines = 2, overflow = TextOverflow.Ellipsis) },
+                text = {
+                    Column {
+                        Text(
+                            "Содержимое папки попадёт в корень архива. JSON-файлы будут проверены.",
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.padding(bottom = 8.dp)
+                        )
+                        TextButton(onClick = {
+                            packFor = null
+                            startPack(pf, "mcaddon")
+                        }) { Text(".mcaddon") }
+                        TextButton(onClick = {
+                            packFor = null
+                            startPack(pf, "mcpack")
+                        }) { Text(".mcpack") }
+                        TextButton(onClick = {
+                            packFor = null
+                            startPack(pf, "zip")
+                        }) { Text(".zip") }
+                    }
+                },
+                confirmButton = {},
+                dismissButton = { TextButton(onClick = { packFor = null }) { Text("Отмена") } }
+            )
+        }
+
+        // Ошибки JSON перед упаковкой
+        val pj = packJob
+        if (pj != null) {
+            AlertDialog(
+                onDismissRequest = { packJob = null },
+                title = { Text("Ошибки в JSON: " + pj.errors.size) },
+                text = {
+                    Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                        for (e in pj.errors.take(10)) {
+                            Text(
+                                e,
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.padding(bottom = 6.dp)
+                            )
+                        }
+                        if (pj.errors.size > 10) {
+                            Text("…и ещё " + (pj.errors.size - 10), style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        packJob = null
+                        doPack(pj.dir, pj.ext)
+                    }) { Text("Всё равно запаковать") }
+                },
+                dismissButton = { TextButton(onClick = { packJob = null }) { Text("Отмена") } }
+            )
+        }
+
+        // Закладки
+        if (showBookmarks) {
+            AlertDialog(
+                onDismissRequest = { showBookmarks = false },
+                title = { Text("Закладки") },
+                text = {
+                    Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                        val here = current.absolutePath
+                        if (here in Bookmarks.list) {
+                            TextButton(onClick = {
+                                Bookmarks.list.remove(here)
+                                Bookmarks.save(context)
+                            }) { Text("Убрать эту папку из закладок") }
+                        } else {
+                            TextButton(onClick = {
+                                Bookmarks.list.add(here)
+                                Bookmarks.save(context)
+                            }) { Text("Добавить эту папку в закладки") }
+                        }
+                        if (Bookmarks.list.isEmpty()) {
+                            Text(
+                                "Закладок пока нет",
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.padding(8.dp)
+                            )
+                        }
+                        for (p in Bookmarks.list.toList()) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                TextButton(
+                                    onClick = {
+                                        val f = File(p)
+                                        if (f.isDirectory) {
+                                            current = f
+                                            searchOn = false
+                                            query = ""
+                                            showBookmarks = false
+                                        } else {
+                                            toast("Папки больше нет")
+                                        }
+                                    },
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Column(modifier = Modifier.fillMaxWidth()) {
+                                        Text(File(p).name.ifEmpty { p }, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        Text(
+                                            p,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                }
+                                IconButton(onClick = {
+                                    Bookmarks.list.remove(p)
+                                    Bookmarks.save(context)
+                                }) { Icon(Icons.Filled.Close, contentDescription = "Удалить закладку") }
+                            }
+                        }
+                    }
+                },
+                confirmButton = {},
+                dismissButton = { TextButton(onClick = { showBookmarks = false }) { Text("Закрыть") } }
             )
         }
 
