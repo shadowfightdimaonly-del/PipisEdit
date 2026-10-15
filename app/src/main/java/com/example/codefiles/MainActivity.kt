@@ -8,8 +8,6 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
-import android.os.Handler
-import android.os.Looper
 import android.provider.Settings
 import android.webkit.MimeTypeMap
 import android.widget.Toast
@@ -25,6 +23,7 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -33,36 +32,57 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarColors
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.zip.ZipFile
 
@@ -92,6 +112,24 @@ val TEXT_EXT = setOf(
     "lang", "mcfunction", "mcmeta"
 )
 
+class Entry(
+    val file: File,
+    val name: String,
+    val isDir: Boolean,
+    val size: Long,
+    val sub: String? = null
+)
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun barColors(): TopAppBarColors = TopAppBarDefaults.topAppBarColors(
+    containerColor = Color.Black,
+    scrolledContainerColor = Color.Black,
+    titleContentColor = PurpleLight,
+    navigationIconContentColor = Purple,
+    actionIconContentColor = Purple
+)
+
 class MainActivity : ComponentActivity() {
 
     private var hasAccess by mutableStateOf(false)
@@ -103,6 +141,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        Prefs.load(this)
         setContent {
             MaterialTheme(colorScheme = AppColors) {
                 Surface(modifier = Modifier.fillMaxSize(), color = Color.Black) {
@@ -141,6 +180,8 @@ class MainActivity : ComponentActivity() {
         }
     }
 }
+
+// ---------- Файловые операции ----------
 
 fun openWithSystem(context: Context, file: File) {
     try {
@@ -189,21 +230,69 @@ fun unzipArchive(archive: File): File? {
     }
 }
 
-fun unpackInBackground(context: Context, archive: File, onDone: () -> Unit) {
-    Toast.makeText(context, "Распаковка…", Toast.LENGTH_SHORT).show()
-    val handler = Handler(Looper.getMainLooper())
-    Thread {
-        val result = unzipArchive(archive)
-        handler.post {
-            if (result == null) {
-                Toast.makeText(context, "Не удалось распаковать", Toast.LENGTH_LONG).show()
-            } else {
-                Toast.makeText(context, "Готово: папка «" + result.name + "»", Toast.LENGTH_LONG).show()
-                onDone()
+fun loadEntries(dir: File): List<Entry> =
+    (dir.listFiles() ?: emptyArray())
+        .map { Entry(it, it.name, it.isDirectory, if (it.isDirectory) 0L else it.length()) }
+        .sortedWith(compareByDescending<Entry> { it.isDir }.thenBy(String.CASE_INSENSITIVE_ORDER) { it.name })
+
+suspend fun searchEntries(base: File, query: String): List<Entry> {
+    val q = query.lowercase()
+    val out = ArrayList<Entry>()
+    val stack = ArrayDeque<File>()
+    stack.add(base)
+    var visited = 0
+    val basePath = base.absolutePath
+    while (stack.isNotEmpty() && out.size < 300 && visited < 30000) {
+        currentCoroutineContext().ensureActive()
+        val dir = stack.removeLast()
+        visited++
+        val kids = dir.listFiles() ?: continue
+        for (f in kids) {
+            val isDir = f.isDirectory
+            if (f.name.lowercase().contains(q)) {
+                val rel = (f.parentFile?.absolutePath ?: "").removePrefix(basePath).ifEmpty { "/" }
+                out.add(Entry(f, f.name, isDir, if (isDir) 0L else f.length(), rel))
             }
+            if (isDir) stack.add(f)
         }
-    }.start()
+    }
+    return out
 }
+
+fun uniqueTarget(dir: File, name: String): File {
+    var t = File(dir, name)
+    if (!t.exists()) return t
+    val dot = name.lastIndexOf('.')
+    val base = if (dot > 0) name.substring(0, dot) else name
+    val ext = if (dot > 0) name.substring(dot) else ""
+    var n = 1
+    while (t.exists()) {
+        t = File(dir, "$base ($n)$ext")
+        n++
+    }
+    return t
+}
+
+fun pasteInto(src: File, destDir: File, move: Boolean): Boolean {
+    val s = src.canonicalPath
+    val d = destDir.canonicalPath
+    if (src.isDirectory && (d == s || d.startsWith(s + File.separator))) return false
+    if (move && src.parentFile?.canonicalPath == d) return true
+    val target = uniqueTarget(destDir, src.name)
+    return if (move) {
+        if (src.renameTo(target)) true else src.copyRecursively(target) && src.deleteRecursively()
+    } else {
+        src.copyRecursively(target)
+    }
+}
+
+fun formatSize(bytes: Long): String = when {
+    bytes < 1024 -> "$bytes Б"
+    bytes < 1024 * 1024 -> "${bytes / 1024} КБ"
+    else -> "${bytes / (1024 * 1024)} МБ"
+}
+
+// ---------- Экраны ----------
 
 @Composable
 fun PermissionScreen(onRequest: () -> Unit) {
@@ -225,116 +314,343 @@ fun PermissionScreen(onRequest: () -> Unit) {
 @Composable
 fun FileBrowser() {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val root = remember { Environment.getExternalStorageDirectory() }
     var current by remember { mutableStateOf(root) }
     var opened by remember { mutableStateOf<File?>(null) }
     var archive by remember { mutableStateOf<File?>(null) }
-    var menuFor by remember { mutableStateOf<File?>(null) }
-    var refresh by remember { mutableStateOf(0) }
+    var menuFor by remember { mutableStateOf<Entry?>(null) }
+    var renameFor by remember { mutableStateOf<File?>(null) }
+    var renameText by remember { mutableStateOf("") }
+    var deleteFor by remember { mutableStateOf<File?>(null) }
+    var showCreate by remember { mutableStateOf(false) }
+    var newName by remember { mutableStateOf("") }
+    var clip by remember { mutableStateOf<Pair<File, Boolean>?>(null) }
+    var refresh by remember { mutableIntStateOf(0) }
+    var searchOn by remember { mutableStateOf(false) }
+    var query by remember { mutableStateOf("") }
+    var entries by remember { mutableStateOf<List<Entry>>(emptyList()) }
+    var loaded by remember { mutableStateOf(false) }
+    var results by remember { mutableStateOf<List<Entry>>(emptyList()) }
+
+    LaunchedEffect(current, refresh) {
+        loaded = false
+        entries = withContext(Dispatchers.IO) { loadEntries(current) }
+        loaded = true
+    }
+
+    LaunchedEffect(query, current, searchOn) {
+        if (searchOn && query.isNotBlank()) {
+            delay(300)
+            results = withContext(Dispatchers.IO) { searchEntries(current, query.trim()) }
+        } else {
+            results = emptyList()
+        }
+    }
+
+    fun toast(msg: String) = Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+
+    fun runOp(start: String?, okMsg: String, failMsg: String, work: () -> Boolean) {
+        if (start != null) toast(start)
+        scope.launch {
+            val ok = withContext(Dispatchers.IO) {
+                try {
+                    work()
+                } catch (e: Exception) {
+                    false
+                }
+            }
+            toast(if (ok) okMsg else failMsg)
+            refresh++
+        }
+    }
+
+    fun createItem(isDir: Boolean) {
+        val n = newName.trim()
+        if (n.isEmpty() || n.contains('/')) {
+            toast("Некорректное имя")
+            return
+        }
+        val f = File(current, n)
+        if (f.exists()) {
+            toast("Уже существует")
+            return
+        }
+        val ok = try {
+            if (isDir) f.mkdirs() else f.createNewFile()
+        } catch (e: Exception) {
+            false
+        }
+        toast(if (ok) "Создано" else "Не удалось создать")
+        showCreate = false
+        refresh++
+    }
 
     val file = opened
     val arc = archive
     if (file != null) {
-        BackHandler { opened = null }
         FileViewer(file = file, onBack = { opened = null })
     } else if (arc != null) {
         ArchiveViewer(archive = arc, onBack = { archive = null })
     } else {
-        BackHandler(enabled = current != root) {
+        BackHandler(enabled = current != root && !searchOn) {
             current = current.parentFile ?: root
         }
-
-        val entries = remember(current, refresh) {
-            (current.listFiles()?.toList() ?: emptyList())
-                .sortedWith(compareByDescending<File> { it.isDirectory }.thenBy { it.name.lowercase() })
+        BackHandler(enabled = searchOn) {
+            searchOn = false
+            query = ""
         }
+
+        val shown = if (searchOn && query.isNotBlank()) results else entries
 
         Scaffold(
             containerColor = Color.Black,
             topBar = {
                 TopAppBar(
                     title = {
-                        Text(
-                            current.absolutePath,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            style = MaterialTheme.typography.titleMedium
-                        )
+                        if (searchOn) {
+                            val focus = remember { FocusRequester() }
+                            BasicTextField(
+                                value = query,
+                                onValueChange = { query = it },
+                                singleLine = true,
+                                textStyle = TextStyle(color = Color.White, fontSize = 18.sp),
+                                cursorBrush = SolidColor(Purple),
+                                modifier = Modifier.fillMaxWidth().focusRequester(focus),
+                                decorationBox = { inner ->
+                                    Box {
+                                        if (query.isEmpty()) {
+                                            Text("Поиск в этой папке…", color = Color.Gray, fontSize = 18.sp)
+                                        }
+                                        inner()
+                                    }
+                                }
+                            )
+                            LaunchedEffect(Unit) { focus.requestFocus() }
+                        } else {
+                            Text(
+                                current.absolutePath,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.titleMedium
+                            )
+                        }
                     },
                     navigationIcon = {
                         if (current != root) {
-                            IconButton(onClick = { current = current.parentFile ?: root }) {
+                            IconButton(onClick = {
+                                current = current.parentFile ?: root
+                                searchOn = false
+                                query = ""
+                            }) {
                                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Назад")
                             }
                         }
                     },
-                    colors = TopAppBarDefaults.topAppBarColors(
-                        containerColor = Color.Black,
-                        titleContentColor = PurpleLight,
-                        navigationIconContentColor = Purple
-                    )
+                    actions = {
+                        val c = clip
+                        if (c != null) {
+                            TextButton(onClick = {
+                                runOp("Вставка…", "Готово", "Не удалось вставить") {
+                                    pasteInto(c.first, current, c.second)
+                                }
+                                if (c.second) clip = null
+                            }) { Text("Вставить", color = Purple) }
+                        }
+                        IconButton(onClick = {
+                            if (searchOn) {
+                                searchOn = false
+                                query = ""
+                            } else {
+                                searchOn = true
+                            }
+                        }) {
+                            Icon(
+                                if (searchOn) Icons.Filled.Close else Icons.Filled.Search,
+                                contentDescription = "Поиск"
+                            )
+                        }
+                    },
+                    colors = barColors()
                 )
+            },
+            floatingActionButton = {
+                if (!searchOn) {
+                    FloatingActionButton(
+                        onClick = {
+                            newName = ""
+                            showCreate = true
+                        },
+                        containerColor = Purple,
+                        contentColor = Color.Black
+                    ) { Icon(Icons.Filled.Add, contentDescription = "Создать") }
+                }
             }
         ) { padding ->
-            if (entries.isEmpty()) {
+            if (!loaded && !searchOn) {
+                Box(modifier = Modifier.fillMaxSize().padding(padding))
+            } else if (shown.isEmpty()) {
                 Column(
                     modifier = Modifier.fillMaxSize().padding(padding),
                     verticalArrangement = Arrangement.Center,
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    Text("Папка пуста")
+                    Text(if (searchOn && query.isNotBlank()) "Ничего не найдено" else "Папка пуста")
                 }
             } else {
-                LazyColumn(modifier = Modifier.fillMaxSize().padding(padding)) {
-                    items(entries, key = { it.absolutePath }) { item ->
-                        FileRow(
-                            file = item,
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize().padding(padding),
+                    contentPadding = PaddingValues(bottom = 88.dp)
+                ) {
+                    items(shown, key = { it.file.absolutePath }) { e ->
+                        ItemRow(
+                            title = e.name,
+                            subtitle = e.sub ?: if (e.isDir) null else formatSize(e.size),
+                            isDir = e.isDir,
                             onClick = {
-                                val ext = item.extension.lowercase()
-                                if (item.isDirectory) {
-                                    current = item
+                                val ext = e.file.extension.lowercase()
+                                if (e.isDir) {
+                                    current = e.file
+                                    searchOn = false
+                                    query = ""
                                 } else if (ext in ARCHIVE_EXT) {
-                                    openWithSystem(context, item)
+                                    openWithSystem(context, e.file)
                                 } else if (ext in TEXT_EXT || ext.isEmpty()) {
-                                    opened = item
+                                    opened = e.file
                                 } else {
-                                    openWithSystem(context, item)
+                                    openWithSystem(context, e.file)
                                 }
                             },
-                            onLongClick = {
-                                if (item.isFile && item.extension.lowercase() in ARCHIVE_EXT) {
-                                    menuFor = item
-                                }
-                            }
+                            onLongClick = { menuFor = e }
                         )
                     }
                 }
             }
         }
 
-        val target = menuFor
-        if (target != null) {
+        // Меню файла / папки
+        val m = menuFor
+        if (m != null) {
+            val isArchive = !m.isDir && m.file.extension.lowercase() in ARCHIVE_EXT
             AlertDialog(
                 onDismissRequest = { menuFor = null },
-                title = { Text(target.name, maxLines = 2, overflow = TextOverflow.Ellipsis) },
+                title = { Text(m.name, maxLines = 2, overflow = TextOverflow.Ellipsis) },
                 text = {
                     Column {
+                        if (isArchive) {
+                            TextButton(onClick = {
+                                archive = m.file
+                                menuFor = null
+                            }) { Text("Посмотреть содержимое") }
+                            TextButton(onClick = {
+                                menuFor = null
+                                runOp("Распаковка…", "Распаковано", "Не удалось распаковать") {
+                                    unzipArchive(m.file) != null
+                                }
+                            }) { Text("Распаковать") }
+                        }
+                        if (!m.isDir) {
+                            TextButton(onClick = {
+                                menuFor = null
+                                openWithSystem(context, m.file)
+                            }) { Text("Открыть с помощью…") }
+                        }
                         TextButton(onClick = {
-                            archive = target
+                            renameText = m.name
+                            renameFor = m.file
                             menuFor = null
-                        }) { Text("Посмотреть содержимое") }
+                        }) { Text("Переименовать") }
                         TextButton(onClick = {
+                            clip = Pair(m.file, false)
                             menuFor = null
-                            unpackInBackground(context, target) { refresh++ }
-                        }) { Text("Распаковать") }
+                            toast("Скопировано. Открой папку и нажми «Вставить»")
+                        }) { Text("Копировать") }
                         TextButton(onClick = {
+                            clip = Pair(m.file, true)
                             menuFor = null
-                            openWithSystem(context, target)
-                        }) { Text("Открыть с помощью…") }
+                            toast("Выбрано. Открой папку и нажми «Вставить»")
+                        }) { Text("Переместить") }
+                        TextButton(onClick = {
+                            deleteFor = m.file
+                            menuFor = null
+                        }) { Text("Удалить") }
                     }
                 },
                 confirmButton = {},
                 dismissButton = { TextButton(onClick = { menuFor = null }) { Text("Отмена") } }
+            )
+        }
+
+        // Создание
+        if (showCreate) {
+            AlertDialog(
+                onDismissRequest = { showCreate = false },
+                title = { Text("Создать") },
+                text = {
+                    Column {
+                        OutlinedTextField(
+                            value = newName,
+                            onValueChange = { newName = it },
+                            singleLine = true,
+                            label = { Text("Имя") }
+                        )
+                        Row {
+                            TextButton(onClick = { createItem(false) }) { Text("Файл") }
+                            TextButton(onClick = { createItem(true) }) { Text("Папка") }
+                        }
+                    }
+                },
+                confirmButton = {},
+                dismissButton = { TextButton(onClick = { showCreate = false }) { Text("Отмена") } }
+            )
+        }
+
+        // Переименование
+        val rf = renameFor
+        if (rf != null) {
+            AlertDialog(
+                onDismissRequest = { renameFor = null },
+                title = { Text("Переименовать") },
+                text = {
+                    OutlinedTextField(
+                        value = renameText,
+                        onValueChange = { renameText = it },
+                        singleLine = true
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        val n = renameText.trim()
+                        val target = File(rf.parentFile, n)
+                        if (n.isEmpty() || n.contains('/')) {
+                            toast("Некорректное имя")
+                        } else if (target.exists()) {
+                            toast("Такое имя уже занято")
+                        } else {
+                            toast(if (rf.renameTo(target)) "Переименовано" else "Не удалось переименовать")
+                            refresh++
+                        }
+                        renameFor = null
+                    }) { Text("OK") }
+                },
+                dismissButton = { TextButton(onClick = { renameFor = null }) { Text("Отмена") } }
+            )
+        }
+
+        // Удаление
+        val df = deleteFor
+        if (df != null) {
+            AlertDialog(
+                onDismissRequest = { deleteFor = null },
+                title = { Text("Удалить «" + df.name + "»?") },
+                text = { Text("Это действие нельзя отменить.") },
+                confirmButton = {
+                    TextButton(onClick = {
+                        deleteFor = null
+                        runOp(null, "Удалено", "Не удалось удалить") { df.deleteRecursively() }
+                    }) { Text("Удалить") }
+                },
+                dismissButton = { TextButton(onClick = { deleteFor = null }) { Text("Отмена") } }
             )
         }
     }
@@ -342,7 +658,13 @@ fun FileBrowser() {
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun FileRow(file: File, onClick: () -> Unit, onLongClick: () -> Unit = {}) {
+fun ItemRow(
+    title: String,
+    subtitle: String?,
+    isDir: Boolean,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit = {}
+) {
     val shape = RoundedCornerShape(10.dp)
     Row(
         modifier = Modifier
@@ -358,30 +680,26 @@ fun FileRow(file: File, onClick: () -> Unit, onLongClick: () -> Unit = {}) {
             modifier = Modifier
                 .size(40.dp)
                 .clip(RoundedCornerShape(8.dp))
-                .background(if (file.isDirectory) Purple else PurpleDark),
+                .background(if (isDir) Purple else PurpleDark),
             contentAlignment = Alignment.Center
         ) {
             Icon(
-                imageVector = if (file.isDirectory) Icons.Filled.Folder else Icons.Filled.Description,
+                imageVector = if (isDir) Icons.Filled.Folder else Icons.Filled.Description,
                 contentDescription = null,
-                tint = if (file.isDirectory) Color.Black else PurpleLight
+                tint = if (isDir) Color.Black else PurpleLight
             )
         }
         Column(modifier = Modifier.padding(start = 14.dp)) {
-            Text(file.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            if (file.isFile) {
+            Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (subtitle != null) {
                 Text(
-                    formatSize(file.length()),
+                    subtitle,
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
         }
     }
-}
-
-fun formatSize(bytes: Long): String = when {
-    bytes < 1024 -> "$bytes Б"
-    bytes < 1024 * 1024 -> "${bytes / 1024} КБ"
-    else -> "${bytes / (1024 * 1024)} МБ"
 }
