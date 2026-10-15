@@ -12,10 +12,10 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
@@ -58,7 +58,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.io.File
 
-// ---------- Настройки (размер шрифта, перенос строк) ----------
+// ---------- Настройки ----------
 
 object Prefs {
     var fontSize by mutableIntStateOf(13)
@@ -78,7 +78,7 @@ object Prefs {
     }
 }
 
-// ---------- Проверка JSON (комментарии // и /* */ разрешены) ----------
+// ---------- Проверка JSON ----------
 
 private class JsonFail(val pos: Int, msg: String) : Exception(msg)
 
@@ -101,9 +101,7 @@ fun checkJson(text: String): String? {
                 val j = s.indexOf("*/", i + 2)
                 if (j < 0) fail(i, "комментарий не закрыт")
                 i = j + 2
-            } else {
-                break
-            }
+            } else break
         }
     }
 
@@ -112,10 +110,7 @@ fun checkJson(text: String): String? {
         i++
         while (i < n) {
             val c = s[i]
-            if (c == '"') {
-                i++
-                return
-            }
+            if (c == '"') { i++; return }
             if (c == '\n') fail(start, "строка не закрыта кавычкой")
             if (c == '\\') i++
             i++
@@ -131,10 +126,7 @@ fun checkJson(text: String): String? {
         if (c == '{') {
             i++
             skip()
-            if (i < n && s[i] == '}') {
-                i++
-                return
-            }
+            if (i < n && s[i] == '}') { i++; return }
             while (true) {
                 skip()
                 if (i >= n) fail(i, "неожиданный конец файла")
@@ -147,23 +139,14 @@ fun checkJson(text: String): String? {
                 value(depth + 1)
                 skip()
                 if (i >= n) fail(i, "неожиданный конец файла")
-                if (s[i] == ',') {
-                    i++
-                    continue
-                }
-                if (s[i] == '}') {
-                    i++
-                    return
-                }
-                fail(i, "ожидалась ',' или '}' (проверь конец предыдущей строки)")
+                if (s[i] == ',') { i++; continue }
+                if (s[i] == '}') { i++; return }
+                fail(i, "ожидалась ',' или '}'")
             }
         } else if (c == '[') {
             i++
             skip()
-            if (i < n && s[i] == ']') {
-                i++
-                return
-            }
+            if (i < n && s[i] == ']') { i++; return }
             while (true) {
                 skip()
                 if (i >= n) fail(i, "неожиданный конец файла")
@@ -171,15 +154,9 @@ fun checkJson(text: String): String? {
                 value(depth + 1)
                 skip()
                 if (i >= n) fail(i, "неожиданный конец файла")
-                if (s[i] == ',') {
-                    i++
-                    continue
-                }
-                if (s[i] == ']') {
-                    i++
-                    return
-                }
-                fail(i, "ожидалась ',' или ']' (проверь конец предыдущей строки)")
+                if (s[i] == ',') { i++; continue }
+                if (s[i] == ']') { i++; return }
+                fail(i, "ожидалась ',' или ']'")
             }
         } else if (c == '"') {
             str()
@@ -188,15 +165,10 @@ fun checkJson(text: String): String? {
             i++
             while (i < n && (s[i].isDigit() || s[i] == '.' || s[i] == 'e' || s[i] == 'E' || s[i] == '+' || s[i] == '-')) i++
             if (s.substring(st, i).toDoubleOrNull() == null) fail(st, "некорректное число")
-        } else if (s.startsWith("true", i)) {
-            i += 4
-        } else if (s.startsWith("false", i)) {
-            i += 5
-        } else if (s.startsWith("null", i)) {
-            i += 4
-        } else {
-            fail(i, "неожиданный символ '$c'")
-        }
+        } else if (s.startsWith("true", i)) i += 4
+        else if (s.startsWith("false", i)) i += 5
+        else if (s.startsWith("null", i)) i += 4
+        else fail(i, "неожиданный символ '$c'")
     }
 
     return try {
@@ -208,12 +180,7 @@ fun checkJson(text: String): String? {
         var line = 1
         var col = 1
         for (k in 0 until minOf(e.pos, n)) {
-            if (s[k] == '\n') {
-                line++
-                col = 1
-            } else {
-                col++
-            }
+            if (s[k] == '\n') { line++; col = 1 } else col++
         }
         "строка $line, столбец $col: ${e.message}"
     } catch (e: StackOverflowError) {
@@ -221,7 +188,7 @@ fun checkJson(text: String): String? {
     }
 }
 
-// ---------- Подсветка синтаксиса ----------
+// ---------- Подсветка ----------
 
 private const val MAX_VIEW = 20L * 1024 * 1024
 private const val MAX_EDIT = 400L * 1024
@@ -271,8 +238,6 @@ private fun colorOf(kind: Int): Color = when (kind) {
     else -> Color(0xFFC586C0)
 }
 
-/** Разбор одной строки. kind: 1 комментарий, 2 строка, 3 число, 4 ключевое слово.
- *  Возвращает true, если строка закончилась внутри блочного комментария. */
 private fun scanLine(
     s: String,
     lang: Lang,
@@ -317,33 +282,19 @@ private fun scanLine(
     while (i < n) {
         val c = s[i]
         if (lang.slash && c == '/' && i + 1 < n && s[i + 1] == '/') {
-            emit(i, n, 1)
-            return false
+            emit(i, n, 1); return false
         }
         if (lang.slash && c == '/' && i + 1 < n && s[i + 1] == '*') {
             val j = s.indexOf("*/", i + 2)
-            if (j < 0) {
-                emit(i, n, 1)
-                return true
-            }
-            emit(i, j + 2, 1)
-            i = j + 2
-            continue
+            if (j < 0) { emit(i, n, 1); return true }
+            emit(i, j + 2, 1); i = j + 2; continue
         }
         if (lang.markup && c == '<' && s.startsWith("<!--", i)) {
             val j = s.indexOf("-->", i + 4)
-            if (j < 0) {
-                emit(i, n, 1)
-                return true
-            }
-            emit(i, j + 3, 1)
-            i = j + 3
-            continue
+            if (j < 0) { emit(i, n, 1); return true }
+            emit(i, j + 3, 1); i = j + 3; continue
         }
-        if (lang.hash && c == '#') {
-            emit(i, n, 1)
-            return false
-        }
+        if (lang.hash && c == '#') { emit(i, n, 1); return false }
         if (c == '"' || (c == '\'' && !lang.markup)) {
             var j = i + 1
             while (j < n && s[j] != c) {
@@ -351,94 +302,68 @@ private fun scanLine(
                 j++
             }
             val end = minOf(j + 1, n)
-            emit(i, end, 2)
-            i = end
-            continue
+            emit(i, end, 2); i = end; continue
         }
         if (c.isDigit()) {
             var j = i + 1
             while (j < n && (s[j].isLetterOrDigit() || s[j] == '.')) j++
-            emit(i, j, 3)
-            i = j
-            continue
+            emit(i, j, 3); i = j; continue
         }
         if (c.isLetter() || c == '_') {
             var j = i + 1
             while (j < n && (s[j].isLetterOrDigit() || s[j] == '_')) j++
             if (!lang.markup && KEYWORDS.contains(s.substring(i, j))) emit(i, j, 4)
-            i = j
-            continue
+            i = j; continue
         }
         i++
     }
     return false
 }
 
+/** Документ с ленивым кешем готовых AnnotatedString на строку. */
 class Doc(
     val text: String,
-    val starts: IntArray,
-    val inBlock: BooleanArray,
-    val lang: Lang?
+    private val starts: IntArray,
+    private val inBlock: BooleanArray,
+    private val lang: Lang?
 ) {
     val lineCount: Int get() = starts.size
-}
 
-private fun sliceLine(text: String, starts: IntArray, i: Int): String {
-    val s = starts[i]
-    val e = if (i + 1 < starts.size) starts[i + 1] - 1 else text.length
-    return text.substring(s, maxOf(s, e))
-}
+    // LRU-подобный кеш: храним не больше 600 последних строк
+    private val cache = HashMap<Int, AnnotatedString>()
+    private val order = ArrayDeque<Int>()
+    private val maxCache = 600
 
-fun buildDoc(raw: String, ext: String): Doc {
-    val text = if (raw.indexOf('\r') >= 0) raw.replace("\r\n", "\n") else raw
-    val lang = langFor(ext)
-    var count = 1
-    for (ch in text) if (ch == '\n') count++
-    val starts = IntArray(count)
-    var k = 1
-    for (i in text.indices) {
-        if (text[i] == '\n') {
-            starts[k] = i + 1
-            k++
-        }
+    fun sliceLine(i: Int): String {
+        val s = starts[i]
+        val e = if (i + 1 < starts.size) starts[i + 1] - 1 else text.length
+        return text.substring(s, maxOf(s, e))
     }
-    val inBlock = BooleanArray(count)
-    if (lang != null) {
-        var state = false
-        for (l in 0 until count) {
-            inBlock[l] = state
-            state = scanLine(sliceLine(text, starts, l), lang, state) { _, _, _ -> }
+
+    fun line(i: Int): AnnotatedString {
+        cache[i]?.let { return it }
+        val result = styledLine(this, i)
+        cache[i] = result
+        order.addLast(i)
+        if (order.size > maxCache) {
+            val old = order.removeFirst()
+            if (old != i) cache.remove(old)
         }
+        return result
     }
-    return Doc(text, starts, inBlock, lang)
+
+    fun inBlockAt(i: Int): Boolean = inBlock[i]
+    fun langOrNull(): Lang? = lang
 }
 
 private fun styledLine(doc: Doc, i: Int): AnnotatedString {
-    var line = sliceLine(doc.text, doc.starts, i)
+    var line = doc.sliceLine(i)
     if (line.length > 3000) line = line.substring(0, 3000) + " …"
-    val lang = doc.lang ?: return AnnotatedString(line)
+    val lang = doc.langOrNull() ?: return AnnotatedString(line)
     return buildAnnotatedString {
         append(line)
-        scanLine(line, lang, doc.inBlock[i]) { s, e, k ->
+        scanLine(line, lang, doc.inBlockAt(i)) { s, e, k ->
             addStyle(SpanStyle(color = colorOf(k)), s, minOf(e, line.length))
-        }
-    }
-}
-
-private fun highlightAll(text: String, ext: String): AnnotatedString {
-    val lang = langFor(ext) ?: return AnnotatedString(text)
-    return buildAnnotatedString {
-        append(text)
-        var state = false
-        var pos = 0
-        while (pos <= text.length) {
-            var e = text.indexOf('\n', pos)
-            if (e < 0) e = text.length
-            val base = pos
-            state = scanLine(text.substring(pos, e), lang, state) { s, en, k ->
-                addStyle(SpanStyle(color = colorOf(k)), base + s, base + en)
-            }
-            pos = e + 1
         }
     }
 }
@@ -450,22 +375,47 @@ private fun loadDoc(file: File): Pair<Doc?, String?> {
         val head = minOf(bytes.size, 2000)
         var binary = false
         for (i in 0 until head) {
-            if (bytes[i].toInt() == 0) {
-                binary = true
-                break
-            }
+            if (bytes[i].toInt() == 0) { binary = true; break }
         }
         if (binary) {
             Pair(null, "Это бинарный файл, показать его нельзя.")
         } else {
-            Pair(buildDoc(String(bytes, Charsets.UTF_8), file.extension.lowercase()), null)
+            val text = String(bytes, Charsets.UTF_8)
+            Pair(buildDoc(text, file.extension.lowercase()), null)
         }
     } catch (e: Throwable) {
         Pair(null, "Не удалось прочитать файл.")
     }
 }
 
-// ---------- Экран просмотра / редактирования ----------
+fun buildDoc(raw: String, ext: String): Doc {
+    val text = if (raw.indexOf('\r') >= 0) raw.replace("\r\n", "\n") else raw
+    val lang = langFor(ext)
+    var count = 1
+    for (ch in text) if (ch == '\n') count++
+    val starts = IntArray(count)
+    var k = 1
+    for (i in text.indices) {
+        if (text[i] == '\n') { starts[k] = i + 1; k++ }
+    }
+    val inBlock = BooleanArray(count)
+    if (lang != null) {
+        var state = false
+        for (l in 0 until count) {
+            inBlock[l] = state
+            state = scanLine(sliceRaw(text, starts, l), lang, state) { _, _, _ -> }
+        }
+    }
+    return Doc(text, starts, inBlock, lang)
+}
+
+private fun sliceRaw(text: String, starts: IntArray, i: Int): String {
+    val s = starts[i]
+    val e = if (i + 1 < starts.size) starts[i + 1] - 1 else text.length
+    return text.substring(s, maxOf(s, e))
+}
+
+// ---------- Экран ----------
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -492,9 +442,7 @@ fun FileViewer(file: File, onBack: () -> Unit, editable: Boolean = true) {
         if (src != null && isJson) {
             if (editing) delay(400)
             jsonError = withContext(Dispatchers.Default) { checkJson(src) }
-        } else {
-            jsonError = null
-        }
+        } else jsonError = null
     }
 
     val loaded = doc
@@ -522,9 +470,7 @@ fun FileViewer(file: File, onBack: () -> Unit, editable: Boolean = true) {
         if (err != null) {
             jsonError = err
             askSaveBad = true
-        } else {
-            save()
-        }
+        } else save()
     }
 
     BackHandler { requestBack() }
@@ -551,28 +497,19 @@ fun FileViewer(file: File, onBack: () -> Unit, editable: Boolean = true) {
                 val tight = PaddingValues(horizontal = 10.dp)
                 TextButton(
                     onClick = {
-                        if (Prefs.fontSize > 8) {
-                            Prefs.fontSize -= 1
-                            Prefs.save(context)
-                        }
+                        if (Prefs.fontSize > 8) { Prefs.fontSize -= 1; Prefs.save(context) }
                     },
                     contentPadding = tight
                 ) { Text("A−") }
                 Text("${Prefs.fontSize}", color = PurpleLight)
                 TextButton(
                     onClick = {
-                        if (Prefs.fontSize < 28) {
-                            Prefs.fontSize += 1
-                            Prefs.save(context)
-                        }
+                        if (Prefs.fontSize < 28) { Prefs.fontSize += 1; Prefs.save(context) }
                     },
                     contentPadding = tight
                 ) { Text("A+") }
                 TextButton(
-                    onClick = {
-                        Prefs.wrap = !Prefs.wrap
-                        Prefs.save(context)
-                    },
+                    onClick = { Prefs.wrap = !Prefs.wrap; Prefs.save(context) },
                     contentPadding = tight
                 ) {
                     Text("Перенос", color = if (Prefs.wrap) Purple else Color.Gray)
@@ -645,9 +582,7 @@ fun FileViewer(file: File, onBack: () -> Unit, editable: Boolean = true) {
                     editing = false
                 }) { Text("Выйти") }
             },
-            dismissButton = {
-                TextButton(onClick = { askDiscard = false }) { Text("Остаться") }
-            }
+            dismissButton = { TextButton(onClick = { askDiscard = false }) { Text("Остаться") } }
         )
     }
 
@@ -662,41 +597,57 @@ fun FileViewer(file: File, onBack: () -> Unit, editable: Boolean = true) {
                     save()
                 }) { Text("Сохранить всё равно") }
             },
-            dismissButton = {
-                TextButton(onClick = { askSaveBad = false }) { Text("Исправить") }
-            }
+            dismissButton = { TextButton(onClick = { askSaveBad = false }) { Text("Исправить") } }
         )
     }
 }
 
+/**
+ * Оптимизированный список строк:
+ *  - key и contentType для LazyColumn → стабильный переиспользуемый рендер
+ *  - фиксированная высота строки → нет перемеров при скролле
+ *  - line() внутри Doc с кешем → нет повторной подсветки при скролле туда-сюда
+ */
 @Composable
 private fun CodeList(doc: Doc) {
     val size = Prefs.fontSize
     val wrap = Prefs.wrap
     val digits = doc.lineCount.toString().length
     val hScroll = rememberScrollState()
+    val lineHeight = (size * 1.35f).sp
 
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
-            .then(if (wrap) Modifier else Modifier.horizontalScroll(hScroll))
+            .then(if (wrap) Modifier else Modifier.horizontalScroll(hScroll)),
+        contentPadding = PaddingValues(vertical = 4.dp)
     ) {
-        items(count = doc.lineCount) { i ->
-            val line = remember(doc, i) { styledLine(doc, i) }
-            Row {
+        items(
+            count = doc.lineCount,
+            key = { it },
+            contentType = { 0 }
+        ) { i ->
+            val line = remember(doc, i) { doc.line(i) }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height((size * 1.35f).dp)
+            ) {
                 Text(
                     text = (i + 1).toString().padStart(digits),
                     fontFamily = FontFamily.Monospace,
                     fontSize = size.sp,
-                    lineHeight = (size * 1.35f).sp,
+                    lineHeight = lineHeight,
                     color = Color(0xFF7C6A99),
+                    maxLines = 1,
                     modifier = Modifier.padding(start = 8.dp, end = 10.dp)
                 )
                 Text(
                     text = line,
                     fontFamily = FontFamily.Monospace,
                     fontSize = size.sp,
-                    lineHeight = (size * 1.35f).sp,
+                    lineHeight = lineHeight,
+                    maxLines = 1,
                     softWrap = wrap,
                     modifier = if (wrap) Modifier.weight(1f).padding(end = 8.dp)
                     else Modifier.padding(end = 16.dp)
@@ -706,16 +657,11 @@ private fun CodeList(doc: Doc) {
     }
 }
 
+/** Редактор без тяжёлой подсветки — подсветка только в просмотре. */
 @Composable
 private fun Editor(text: String, ext: String, onChange: (String) -> Unit) {
     val size = Prefs.fontSize
     val wrap = Prefs.wrap
-    val transformation = remember(ext) {
-        object : VisualTransformation {
-            override fun filter(text: AnnotatedString): TransformedText =
-                TransformedText(highlightAll(text.text, ext), OffsetMapping.Identity)
-        }
-    }
     val vScroll = rememberScrollState()
     val hScroll = rememberScrollState()
 
@@ -736,7 +682,6 @@ private fun Editor(text: String, ext: String, onChange: (String) -> Unit) {
                 color = Color(0xFFEDE0FF)
             ),
             cursorBrush = SolidColor(Purple),
-            visualTransformation = transformation,
             modifier = (if (wrap) Modifier.fillMaxWidth() else Modifier).heightIn(min = 300.dp)
         )
     }
