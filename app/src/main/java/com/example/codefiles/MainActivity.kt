@@ -106,8 +106,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            val colors = if (isSystemInDarkTheme()) darkColorScheme() else lightColorScheme()
-            MaterialTheme(colorScheme = colors) {
+                       MaterialTheme(colorScheme = AppColors) {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     if (hasAccess) {
                         FileBrowser()
@@ -266,13 +265,17 @@ fun FileBrowser() {
                     navigationIcon = {
                         if (current != root) {
                             IconButton(onClick = { current = current.parentFile ?: root }) {
-                                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Назад")
+                                                                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Назад")
                             }
                         }
                     }
-                )
-            }
-        ) { padding ->
+                                    },
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = Color.Black,
+                        titleContentColor = PurpleLight,
+                        navigationIconContentColor = Purple
+                    )
+                ) { padding ->
             if (entries.isEmpty()) {
                 Column(
                     modifier = Modifier.fillMaxSize().padding(padding),
