@@ -1,18 +1,24 @@
 package com.example.codefiles
 
 import android.Manifest
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
+import android.webkit.MimeTypeMap
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -26,6 +32,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -34,6 +41,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
@@ -44,9 +52,22 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.core.content.FileProvider
 import java.io.File
+import java.util.zip.ZipFile
+
+val ARCHIVE_EXT = setOf("zip", "mcaddon", "mcpack", "mcworld", "mctemplate", "apk", "jar")
+
+val TEXT_EXT = setOf(
+    "txt", "md", "log", "csv", "json", "xml", "html", "htm", "css", "scss", "js", "ts",
+    "tsx", "jsx", "kt", "kts", "java", "py", "sh", "bash", "yml", "yaml", "toml", "rb",
+    "properties", "gitignore", "gitattributes", "conf", "ini", "cfg", "env", "c", "h",
+    "cpp", "hpp", "cs", "go", "rs", "swift", "dart", "php", "gradle", "sql", "bat",
+    "lang", "mcfunction", "mcmeta"
+)
 
 class MainActivity : ComponentActivity() {
 
@@ -99,6 +120,69 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+fun openWithSystem(context: Context, file: File) {
+    try {
+        val uri = FileProvider.getUriForFile(context, context.packageName + ".files", file)
+        val mime = MimeTypeMap.getSingleton()
+            .getMimeTypeFromExtension(file.extension.lowercase()) ?: "*/*"
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, mime)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        context.startActivity(Intent.createChooser(intent, "Открыть с помощью"))
+    } catch (e: Exception) {
+        Toast.makeText(context, "Нет приложения для этого файла", Toast.LENGTH_LONG).show()
+    }
+}
+
+fun unzipArchive(archive: File): File? {
+    val parent = archive.parentFile ?: return null
+    val base = archive.nameWithoutExtension
+    var target = File(parent, base)
+    var n = 1
+    while (target.exists()) {
+        target = File(parent, "$base ($n)")
+        n++
+    }
+    return try {
+        target.mkdirs()
+        val safeRoot = target.canonicalPath + File.separator
+        ZipFile(archive).use { zip ->
+            for (entry in zip.entries().toList()) {
+                val out = File(target, entry.name)
+                if (!out.canonicalPath.startsWith(safeRoot)) continue
+                if (entry.isDirectory) {
+                    out.mkdirs()
+                } else {
+                    out.parentFile?.mkdirs()
+                    zip.getInputStream(entry).use { input ->
+                        out.outputStream().use { output -> input.copyTo(output) }
+                    }
+                }
+            }
+        }
+        target
+    } catch (e: Exception) {
+        null
+    }
+}
+
+fun unpackInBackground(context: Context, archive: File, onDone: () -> Unit) {
+    Toast.makeText(context, "Распаковка…", Toast.LENGTH_SHORT).show()
+    val handler = Handler(Looper.getMainLooper())
+    Thread {
+        val result = unzipArchive(archive)
+        handler.post {
+            if (result == null) {
+                Toast.makeText(context, "Не удалось распаковать", Toast.LENGTH_LONG).show()
+            } else {
+                Toast.makeText(context, "Готово: папка «" + result.name + "»", Toast.LENGTH_LONG).show()
+                onDone()
+            }
+        }
+    }.start()
+}
+
 @Composable
 fun PermissionScreen(onRequest: () -> Unit) {
     Column(
@@ -118,20 +202,27 @@ fun PermissionScreen(onRequest: () -> Unit) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun FileBrowser() {
+    val context = LocalContext.current
     val root = remember { Environment.getExternalStorageDirectory() }
     var current by remember { mutableStateOf(root) }
     var opened by remember { mutableStateOf<File?>(null) }
+    var archive by remember { mutableStateOf<File?>(null) }
+    var menuFor by remember { mutableStateOf<File?>(null) }
+    var refresh by remember { mutableStateOf(0) }
 
     val file = opened
+    val arc = archive
     if (file != null) {
         BackHandler { opened = null }
         FileViewer(file = file, onBack = { opened = null })
+    } else if (arc != null) {
+        ArchiveViewer(archive = arc, onBack = { archive = null })
     } else {
         BackHandler(enabled = current != root) {
             current = current.parentFile ?: root
         }
 
-        val entries = remember(current) {
+        val entries = remember(current, refresh) {
             (current.listFiles()?.toList() ?: emptyList())
                 .sortedWith(compareByDescending<File> { it.isDirectory }.thenBy { it.name.lowercase() })
         }
@@ -168,22 +259,66 @@ fun FileBrowser() {
             } else {
                 LazyColumn(modifier = Modifier.fillMaxSize().padding(padding)) {
                     items(entries, key = { it.absolutePath }) { item ->
-                        FileRow(item) {
-                            if (item.isDirectory) current = item else opened = item
-                        }
+                        FileRow(
+                            file = item,
+                            onClick = {
+                                val ext = item.extension.lowercase()
+                                if (item.isDirectory) {
+                                    current = item
+                                } else if (ext in ARCHIVE_EXT) {
+                                    openWithSystem(context, item)
+                                } else if (ext in TEXT_EXT || ext.isEmpty()) {
+                                    opened = item
+                                } else {
+                                    openWithSystem(context, item)
+                                }
+                            },
+                            onLongClick = {
+                                if (item.isFile && item.extension.lowercase() in ARCHIVE_EXT) {
+                                    menuFor = item
+                                }
+                            }
+                        )
                     }
                 }
             }
         }
+
+        val target = menuFor
+        if (target != null) {
+            AlertDialog(
+                onDismissRequest = { menuFor = null },
+                title = { Text(target.name, maxLines = 2, overflow = TextOverflow.Ellipsis) },
+                text = {
+                    Column {
+                        TextButton(onClick = {
+                            archive = target
+                            menuFor = null
+                        }) { Text("Посмотреть содержимое") }
+                        TextButton(onClick = {
+                            menuFor = null
+                            unpackInBackground(context, target) { refresh++ }
+                        }) { Text("Распаковать") }
+                        TextButton(onClick = {
+                            menuFor = null
+                            openWithSystem(context, target)
+                        }) { Text("Открыть с помощью…") }
+                    }
+                },
+                confirmButton = {},
+                dismissButton = { TextButton(onClick = { menuFor = null }) { Text("Отмена") } }
+            )
+        }
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun FileRow(file: File, onClick: () -> Unit) {
+fun FileRow(file: File, onClick: () -> Unit, onLongClick: () -> Unit = {}) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
