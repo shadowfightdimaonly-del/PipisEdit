@@ -54,6 +54,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.io.File
 
@@ -77,20 +78,169 @@ object Prefs {
     }
 }
 
+// ---------- Проверка JSON (комментарии // и /* */ разрешены) ----------
+
+private class JsonFail(val pos: Int, msg: String) : Exception(msg)
+
+fun checkJson(text: String): String? {
+    if (text.isBlank()) return null
+    val s = text
+    val n = s.length
+    var i = 0
+
+    fun fail(pos: Int, msg: String): Nothing = throw JsonFail(pos, msg)
+
+    fun skip() {
+        while (i < n) {
+            val c = s[i]
+            if (c == ' ' || c == '\n' || c == '\t' || c == '\r' || c == '\uFEFF') {
+                i++
+            } else if (c == '/' && i + 1 < n && s[i + 1] == '/') {
+                while (i < n && s[i] != '\n') i++
+            } else if (c == '/' && i + 1 < n && s[i + 1] == '*') {
+                val j = s.indexOf("*/", i + 2)
+                if (j < 0) fail(i, "комментарий не закрыт")
+                i = j + 2
+            } else {
+                break
+            }
+        }
+    }
+
+    fun str() {
+        val start = i
+        i++
+        while (i < n) {
+            val c = s[i]
+            if (c == '"') {
+                i++
+                return
+            }
+            if (c == '\n') fail(start, "строка не закрыта кавычкой")
+            if (c == '\\') i++
+            i++
+        }
+        fail(start, "строка не закрыта кавычкой")
+    }
+
+    fun value(depth: Int) {
+        if (depth > 200) fail(i, "слишком глубокая вложенность")
+        skip()
+        if (i >= n) fail(i, "неожиданный конец файла")
+        val c = s[i]
+        if (c == '{') {
+            i++
+            skip()
+            if (i < n && s[i] == '}') {
+                i++
+                return
+            }
+            while (true) {
+                skip()
+                if (i >= n) fail(i, "неожиданный конец файла")
+                if (s[i] == '}') fail(i, "лишняя запятая перед '}'")
+                if (s[i] != '"') fail(i, "ожидалось имя ключа в кавычках")
+                str()
+                skip()
+                if (i >= n || s[i] != ':') fail(i, "ожидалось ':'")
+                i++
+                value(depth + 1)
+                skip()
+                if (i >= n) fail(i, "неожиданный конец файла")
+                if (s[i] == ',') {
+                    i++
+                    continue
+                }
+                if (s[i] == '}') {
+                    i++
+                    return
+                }
+                fail(i, "ожидалась ',' или '}' (проверь конец предыдущей строки)")
+            }
+        } else if (c == '[') {
+            i++
+            skip()
+            if (i < n && s[i] == ']') {
+                i++
+                return
+            }
+            while (true) {
+                skip()
+                if (i >= n) fail(i, "неожиданный конец файла")
+                if (s[i] == ']') fail(i, "лишняя запятая перед ']'")
+                value(depth + 1)
+                skip()
+                if (i >= n) fail(i, "неожиданный конец файла")
+                if (s[i] == ',') {
+                    i++
+                    continue
+                }
+                if (s[i] == ']') {
+                    i++
+                    return
+                }
+                fail(i, "ожидалась ',' или ']' (проверь конец предыдущей строки)")
+            }
+        } else if (c == '"') {
+            str()
+        } else if (c == '-' || c.isDigit()) {
+            val st = i
+            i++
+            while (i < n && (s[i].isDigit() || s[i] == '.' || s[i] == 'e' || s[i] == 'E' || s[i] == '+' || s[i] == '-')) i++
+            if (s.substring(st, i).toDoubleOrNull() == null) fail(st, "некорректное число")
+        } else if (s.startsWith("true", i)) {
+            i += 4
+        } else if (s.startsWith("false", i)) {
+            i += 5
+        } else if (s.startsWith("null", i)) {
+            i += 4
+        } else {
+            fail(i, "неожиданный символ '$c'")
+        }
+    }
+
+    return try {
+        value(0)
+        skip()
+        if (i < n) fail(i, "лишний текст после конца JSON")
+        null
+    } catch (e: JsonFail) {
+        var line = 1
+        var col = 1
+        for (k in 0 until minOf(e.pos, n)) {
+            if (s[k] == '\n') {
+                line++
+                col = 1
+            } else {
+                col++
+            }
+        }
+        "строка $line, столбец $col: ${e.message}"
+    } catch (e: StackOverflowError) {
+        "слишком глубокая вложенность"
+    }
+}
+
 // ---------- Подсветка синтаксиса ----------
 
 private const val MAX_VIEW = 20L * 1024 * 1024
 private const val MAX_EDIT = 400L * 1024
 
-class Lang(val hash: Boolean, val slash: Boolean, val markup: Boolean)
+class Lang(
+    val hash: Boolean,
+    val slash: Boolean,
+    val markup: Boolean,
+    val firstWord: Boolean = false,
+    val keyValue: Boolean = false
+)
 
 private val HASH_EXT = setOf(
     "py", "sh", "bash", "yml", "yaml", "toml", "rb", "properties", "gitignore",
-    "conf", "ini", "cfg", "env", "mcfunction"
+    "conf", "ini", "cfg", "env"
 )
 private val SLASH_EXT = setOf(
     "kt", "kts", "java", "js", "ts", "tsx", "jsx", "c", "h", "cpp", "hpp", "cs",
-    "go", "rs", "swift", "dart", "php", "gradle", "css", "scss", "json"
+    "go", "rs", "swift", "dart", "php", "gradle", "css", "scss", "json", "mcmeta"
 )
 private val MARKUP_EXT = setOf("xml", "html", "htm")
 
@@ -106,6 +256,8 @@ private val KEYWORDS = hashSetOf(
 )
 
 private fun langFor(ext: String): Lang? = when {
+    ext == "mcfunction" -> Lang(hash = true, slash = false, markup = false, firstWord = true)
+    ext == "lang" -> Lang(hash = true, slash = false, markup = false, keyValue = true)
     ext in HASH_EXT -> Lang(hash = true, slash = false, markup = false)
     ext in SLASH_EXT -> Lang(hash = false, slash = true, markup = false)
     ext in MARKUP_EXT -> Lang(hash = false, slash = false, markup = true)
@@ -128,6 +280,19 @@ private fun scanLine(
     emit: (Int, Int, Int) -> Unit
 ): Boolean {
     val n = s.length
+
+    if (lang.keyValue) {
+        if (s.trimStart().startsWith("#")) {
+            if (n > 0) emit(0, n, 1)
+            return false
+        }
+        val eq = s.indexOf('=')
+        if (eq > 0) emit(0, eq, 4)
+        val hashAt = s.indexOf('#', if (eq > 0) eq else 0)
+        if (hashAt >= 0) emit(hashAt, n, 1)
+        return false
+    }
+
     val closer = if (lang.markup) "-->" else "*/"
     var i = 0
     if (startInBlock) {
@@ -138,6 +303,16 @@ private fun scanLine(
         }
         emit(0, j + closer.length, 1)
         i = j + closer.length
+    }
+    if (lang.firstWord) {
+        var k = 0
+        while (k < n && (s[k] == ' ' || s[k] == '\t')) k++
+        if (k < n && s[k] != '#') {
+            var j = k
+            while (j < n && s[j] != ' ' && s[j] != '\t') j++
+            emit(k, j, 4)
+            i = j
+        }
     }
     while (i < n) {
         val c = s[i]
@@ -297,16 +472,29 @@ private fun loadDoc(file: File): Pair<Doc?, String?> {
 fun FileViewer(file: File, onBack: () -> Unit, editable: Boolean = true) {
     val context = LocalContext.current
     val ext = remember(file) { file.extension.lowercase() }
+    val isJson = ext == "json" || ext == "mcmeta"
     var doc by remember(file) { mutableStateOf<Doc?>(null) }
     var error by remember(file) { mutableStateOf<String?>(null) }
     var editing by remember(file) { mutableStateOf(false) }
     var editText by remember(file) { mutableStateOf("") }
     var askDiscard by remember(file) { mutableStateOf(false) }
+    var askSaveBad by remember(file) { mutableStateOf(false) }
+    var jsonError by remember(file) { mutableStateOf<String?>(null) }
 
     LaunchedEffect(file) {
         val result = withContext(Dispatchers.IO) { loadDoc(file) }
         doc = result.first
         error = result.second
+    }
+
+    LaunchedEffect(file, doc, editing, editText) {
+        val src = if (editing) editText else doc?.text
+        if (src != null && isJson) {
+            if (editing) delay(400)
+            jsonError = withContext(Dispatchers.Default) { checkJson(src) }
+        } else {
+            jsonError = null
+        }
     }
 
     val loaded = doc
@@ -326,6 +514,16 @@ fun FileViewer(file: File, onBack: () -> Unit, editable: Boolean = true) {
             Toast.makeText(context, "Сохранено", Toast.LENGTH_SHORT).show()
         } catch (e: Exception) {
             Toast.makeText(context, "Не удалось сохранить", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    fun trySave() {
+        val err = if (isJson) checkJson(editText) else null
+        if (err != null) {
+            jsonError = err
+            askSaveBad = true
+        } else {
+            save()
         }
     }
 
@@ -382,7 +580,7 @@ fun FileViewer(file: File, onBack: () -> Unit, editable: Boolean = true) {
                 Spacer(modifier = Modifier.weight(1f))
                 if (editable && loaded != null) {
                     if (editing) {
-                        TextButton(onClick = { save() }, contentPadding = tight) { Text("Сохранить") }
+                        TextButton(onClick = { trySave() }, contentPadding = tight) { Text("Сохранить") }
                     } else {
                         TextButton(
                             onClick = {
@@ -401,6 +599,16 @@ fun FileViewer(file: File, onBack: () -> Unit, editable: Boolean = true) {
                         ) { Text("Править") }
                     }
                 }
+            }
+
+            if (isJson && loaded != null) {
+                val je = jsonError
+                Text(
+                    text = if (je == null) "✓ JSON корректен" else "⚠ $je",
+                    color = if (je == null) Color(0xFF6AD07A) else Color(0xFFFF6B6B),
+                    fontSize = 12.sp,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp)
+                )
             }
 
             Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
@@ -439,6 +647,23 @@ fun FileViewer(file: File, onBack: () -> Unit, editable: Boolean = true) {
             },
             dismissButton = {
                 TextButton(onClick = { askDiscard = false }) { Text("Остаться") }
+            }
+        )
+    }
+
+    if (askSaveBad) {
+        AlertDialog(
+            onDismissRequest = { askSaveBad = false },
+            title = { Text("В JSON есть ошибка") },
+            text = { Text(jsonError ?: "") },
+            confirmButton = {
+                TextButton(onClick = {
+                    askSaveBad = false
+                    save()
+                }) { Text("Сохранить всё равно") }
+            },
+            dismissButton = {
+                TextButton(onClick = { askSaveBad = false }) { Text("Исправить") }
             }
         )
     }
