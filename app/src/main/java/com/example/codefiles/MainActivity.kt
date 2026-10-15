@@ -39,12 +39,16 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Bookmark
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
@@ -109,7 +113,6 @@ val AppColors = darkColorScheme(
 )
 
 val ARCHIVE_EXT = setOf("zip", "mcaddon", "mcpack", "mcworld", "mctemplate", "apk", "jar")
-
 val IMAGE_EXT = setOf("png", "jpg", "jpeg", "webp", "gif", "bmp")
 
 val TEXT_EXT = setOf(
@@ -126,9 +129,13 @@ class Entry(
     val isDir: Boolean,
     val size: Long,
     val sub: String? = null
-)
+) {
+    val sizeText: String? by lazy(LazyThreadSafetyMode.NONE) {
+        if (isDir) null else formatSize(size)
+    }
+}
 
-class PackJob(val dir: File, val ext: String, val errors: List<String>)
+class PackJob(val items: List<File>, val ext: String, val errors: List<String>)
 
 object Bookmarks {
     val list = mutableStateListOf<String>()
@@ -258,10 +265,18 @@ fun unzipArchive(archive: File): File? {
     }
 }
 
-/** Пакует содержимое папки в корень архива (manifest.json окажется в корне). */
-fun zipFolder(src: File, out: File): Boolean =
-    try {
-        ZipOutputStream(out.outputStream().buffered()).use { zos ->
+/**
+ * Упаковка набора элементов:
+ *  - если выделена ровно ОДНА папка → её содержимое идёт в корень архива (mcpack-стиль);
+ *  - иначе → каждая папка становится подпапкой в корне архива (mcaddon-стиль),
+ *    а отдельные файлы кладутся в корень архива.
+ */
+fun zipItems(items: List<File>, out: File): Boolean = try {
+    ZipOutputStream(out.outputStream().buffered()).use { zos ->
+        val flatten = items.size == 1 && items[0].isDirectory
+
+        if (flatten) {
+            val src = items[0]
             val base = src.absolutePath
             src.walkTopDown().forEach { f ->
                 if (f == src) return@forEach
@@ -276,49 +291,93 @@ fun zipFolder(src: File, out: File): Boolean =
                     zos.closeEntry()
                 }
             }
+        } else {
+            for (item in items) {
+                if (item.isDirectory) {
+                    val base = item.absolutePath
+                    val prefix = item.name + "/"
+                    item.walkTopDown().forEach { f ->
+                        if (f.name == ".DS_Store" || f.name == "Thumbs.db") return@forEach
+                        val rel = if (f == item) prefix
+                        else prefix + f.absolutePath.removePrefix(base).trimStart('/')
+                        if (f.isDirectory) {
+                            zos.putNextEntry(ZipEntry(if (rel.endsWith("/")) rel else "$rel/"))
+                            zos.closeEntry()
+                        } else {
+                            zos.putNextEntry(ZipEntry(rel))
+                            f.inputStream().use { it.copyTo(zos) }
+                            zos.closeEntry()
+                        }
+                    }
+                } else {
+                    if (item.name == ".DS_Store" || item.name == "Thumbs.db") continue
+                    zos.putNextEntry(ZipEntry(item.name))
+                    item.inputStream().use { it.copyTo(zos) }
+                    zos.closeEntry()
+                }
+            }
         }
-        true
-    } catch (e: Throwable) {
-        out.delete()
-        false
     }
+    true
+} catch (e: Throwable) {
+    out.delete()
+    false
+}
 
-fun scanJsonErrors(dir: File): List<String> {
+/** Имя архива: если текущая папка — корень внешнего хранилища, то addon.<ext>, иначе <имя_папки>.<ext>. */
+fun archiveBaseName(dir: File, ext: String): String {
+    val rootPath = Environment.getExternalStorageDirectory().absolutePath
+    val name = if (dir.absolutePath == rootPath || dir.name.isBlank()) "addon" else dir.name
+    return "$name.$ext"
+}
+
+fun scanJsonErrorsMulti(folders: List<File>): List<String> {
     val out = ArrayList<String>()
-    val base = dir.absolutePath
-    for (f in dir.walkTopDown()) {
-        if (!f.isFile) continue
-        val ext = f.extension.lowercase()
-        if (ext != "json" && ext != "mcmeta") continue
-        if (f.length() > 3L * 1024 * 1024) continue
-        val err = try {
-            checkJson(f.readText())
-        } catch (e: Throwable) {
-            null
-        }
-        if (err != null) {
-            out.add(f.absolutePath.removePrefix(base).trimStart('/') + " — " + err)
-            if (out.size >= 50) break
+    for (dir in folders) {
+        val base = dir.absolutePath
+        for (f in dir.walkTopDown()) {
+            if (!f.isFile) continue
+            val ext = f.extension.lowercase()
+            if (ext != "json" && ext != "mcmeta") continue
+            if (f.length() > 3L * 1024 * 1024) continue
+            val err = try {
+                checkJson(f.readText())
+            } catch (e: Throwable) {
+                null
+            }
+            if (err != null) {
+                val rel = f.absolutePath.removePrefix(base).trimStart('/')
+                out.add("${dir.name}/$rel — $err")
+                if (out.size >= 50) return out
+            }
         }
     }
     return out
 }
 
-fun loadEntries(dir: File): List<Entry> =
-    (dir.listFiles() ?: emptyArray())
-        .map { Entry(it, it.name, it.isDirectory, if (it.isDirectory) 0L else it.length()) }
-        .sortedWith(compareByDescending<Entry> { it.isDir }.thenBy(String.CASE_INSENSITIVE_ORDER) { it.name })
+fun loadEntries(dir: File): List<Entry> {
+    val files = dir.listFiles() ?: return emptyList()
+    val out = ArrayList<Entry>(files.size)
+    for (f in files) {
+        out.add(Entry(f, f.name, f.isDirectory, if (f.isDirectory) 0L else f.length()))
+    }
+    out.sortWith(
+        compareByDescending<Entry> { it.isDir }
+            .thenBy(String.CASE_INSENSITIVE_ORDER) { it.name }
+    )
+    return out
+}
 
 suspend fun searchEntries(base: File, query: String): List<Entry> {
     val q = query.lowercase()
     val out = ArrayList<Entry>()
-    val stack = ArrayDeque<File>()
-    stack.add(base)
+    val stack = ArrayDeque<Pair<File, Int>>()
+    stack.add(base to 0)
     var visited = 0
     val basePath = base.absolutePath
     while (stack.isNotEmpty() && out.size < 300 && visited < 30000) {
         currentCoroutineContext().ensureActive()
-        val dir = stack.removeLast()
+        val (dir, depth) = stack.removeLast()
         visited++
         val kids = dir.listFiles() ?: continue
         for (f in kids) {
@@ -327,7 +386,7 @@ suspend fun searchEntries(base: File, query: String): List<Entry> {
                 val rel = (f.parentFile?.absolutePath ?: "").removePrefix(basePath).ifEmpty { "/" }
                 out.add(Entry(f, f.name, isDir, if (isDir) 0L else f.length(), rel))
             }
-            if (isDir) stack.add(f)
+            if (isDir && depth < 8) stack.add(f to (depth + 1))
         }
     }
     return out
@@ -384,7 +443,7 @@ fun PermissionScreen(onRequest: () -> Unit) {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun FileBrowser() {
     val context = LocalContext.current
@@ -394,7 +453,6 @@ fun FileBrowser() {
     var opened by remember { mutableStateOf<File?>(null) }
     var image by remember { mutableStateOf<File?>(null) }
     var archive by remember { mutableStateOf<File?>(null) }
-    var menuFor by remember { mutableStateOf<Entry?>(null) }
     var renameFor by remember { mutableStateOf<File?>(null) }
     var renameText by remember { mutableStateOf("") }
     var deleteFor by remember { mutableStateOf<File?>(null) }
@@ -408,12 +466,33 @@ fun FileBrowser() {
     var loaded by remember { mutableStateOf(false) }
     var results by remember { mutableStateOf<List<Entry>>(emptyList()) }
     var showBookmarks by remember { mutableStateOf(false) }
-    var packFor by remember { mutableStateOf<File?>(null) }
     var packJob by remember { mutableStateOf<PackJob?>(null) }
+    var showPackDialog by remember { mutableStateOf(false) }
+    var overflowOpen by remember { mutableStateOf(false) }
 
-    LaunchedEffect(current, refresh) {
-        loaded = false
-        entries = withContext(Dispatchers.IO) { loadEntries(current) }
+    // === Выделение ===
+    val selected = remember { mutableStateListOf<String>() }
+    val selectionMode = selected.isNotEmpty()
+
+    fun enterSelection(path: String) {
+        searchOn = false
+        query = ""
+        if (path !in selected) selected.add(path)
+    }
+
+    fun toggleSelection(path: String) {
+        if (path in selected) selected.remove(path) else selected.add(path)
+    }
+
+    fun exitSelection() {
+        selected.clear()
+    }
+
+    fun selectedFiles(): List<File> = selected.map { File(it) }
+
+    LaunchedEffect(current) {
+        val list = withContext(Dispatchers.IO) { loadEntries(current) }
+        entries = list
         loaded = true
     }
 
@@ -443,19 +522,48 @@ fun FileBrowser() {
         }
     }
 
-    fun doPack(dir: File, ext: String) {
-        runOp("Упаковка…", "Архив создан рядом с папкой", "Не удалось упаковать") {
-            val parent = dir.parentFile
-            if (parent == null) false else zipFolder(dir, uniqueTarget(parent, dir.name + "." + ext))
+    fun doPack(items: List<File>, ext: String) {
+        val dirAtCall = current
+        runOp("Упаковка…", "Архив создан", "Не удалось упаковать") {
+            val target = uniqueTarget(dirAtCall, archiveBaseName(dirAtCall, ext))
+            zipItems(items, target)
         }
     }
 
-    fun startPack(dir: File, ext: String) {
-        toast("Проверка JSON…")
-        scope.launch {
-            val errors = withContext(Dispatchers.IO) { scanJsonErrors(dir) }
-            if (errors.isEmpty()) doPack(dir, ext) else packJob = PackJob(dir, ext, errors)
+    fun startPack(items: List<File>, ext: String) {
+        if (ext == "mcaddon" || ext == "mcpack") {
+            toast("Проверка JSON…")
+            scope.launch {
+                val folders = items.filter { it.isDirectory }
+                val errors = withContext(Dispatchers.IO) { scanJsonErrorsMulti(folders) }
+                if (errors.isEmpty()) doPack(items, ext) else packJob = PackJob(items, ext, errors)
+            }
+        } else {
+            doPack(items, ext)
         }
+    }
+
+    fun validateAndPack(items: List<File>, ext: String): Boolean {
+        val allDirs = items.all { it.isDirectory }
+        when (ext) {
+            "mcaddon" -> {
+                if (items.size < 2) {
+                    toast("Для .mcaddon нужно 2 и более папок")
+                    return false
+                }
+                if (!allDirs) {
+                    toast("В .mcaddon можно упаковывать только папки")
+                    return false
+                }
+            }
+            "mcpack" -> {
+                if (items.size != 1 || !allDirs) {
+                    toast("Для .mcpack нужна ровно 1 папка")
+                    return false
+                }
+            }
+        }
+        return true
     }
 
     fun createItem(isDir: Boolean) {
@@ -492,12 +600,14 @@ fun FileBrowser() {
     } else if (arc != null) {
         ArchiveViewer(archive = arc, onBack = { archive = null })
     } else {
-        BackHandler(enabled = current != root && !searchOn) {
-            current = current.parentFile ?: root
-        }
-        BackHandler(enabled = searchOn) {
+        // Back: сначала выход из выделения, потом из поиска, потом наверх
+        BackHandler(enabled = selectionMode) { exitSelection() }
+        BackHandler(enabled = !selectionMode && searchOn) {
             searchOn = false
             query = ""
+        }
+        BackHandler(enabled = !selectionMode && !searchOn && current != root) {
+            current = current.parentFile ?: root
         }
 
         val shown = if (searchOn && query.isNotBlank()) results else entries
@@ -507,36 +617,49 @@ fun FileBrowser() {
             topBar = {
                 TopAppBar(
                     title = {
-                        if (searchOn) {
-                            val focus = remember { FocusRequester() }
-                            BasicTextField(
-                                value = query,
-                                onValueChange = { query = it },
-                                singleLine = true,
-                                textStyle = TextStyle(color = Color.White, fontSize = 18.sp),
-                                cursorBrush = SolidColor(Purple),
-                                modifier = Modifier.fillMaxWidth().focusRequester(focus),
-                                decorationBox = { inner ->
-                                    Box {
-                                        if (query.isEmpty()) {
-                                            Text("Поиск в этой папке…", color = Color.Gray, fontSize = 18.sp)
+                        when {
+                            selectionMode -> {
+                                Text(
+                                    "Выбрано: ${selected.size}",
+                                    style = MaterialTheme.typography.titleMedium
+                                )
+                            }
+                            searchOn -> {
+                                val focus = remember { FocusRequester() }
+                                BasicTextField(
+                                    value = query,
+                                    onValueChange = { query = it },
+                                    singleLine = true,
+                                    textStyle = TextStyle(color = Color.White, fontSize = 18.sp),
+                                    cursorBrush = SolidColor(Purple),
+                                    modifier = Modifier.fillMaxWidth().focusRequester(focus),
+                                    decorationBox = { inner ->
+                                        Box {
+                                            if (query.isEmpty()) {
+                                                Text("Поиск в этой папке…", color = Color.Gray, fontSize = 18.sp)
+                                            }
+                                            inner()
                                         }
-                                        inner()
                                     }
-                                }
-                            )
-                            LaunchedEffect(Unit) { focus.requestFocus() }
-                        } else {
-                            Text(
-                                current.absolutePath,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                style = MaterialTheme.typography.titleMedium
-                            )
+                                )
+                                LaunchedEffect(Unit) { focus.requestFocus() }
+                            }
+                            else -> {
+                                Text(
+                                    current.absolutePath,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    style = MaterialTheme.typography.titleMedium
+                                )
+                            }
                         }
                     },
                     navigationIcon = {
-                        if (current != root) {
+                        if (selectionMode) {
+                            IconButton(onClick = { exitSelection() }) {
+                                Icon(Icons.Filled.Close, contentDescription = "Выйти из выделения")
+                            }
+                        } else if (current != root) {
                             IconButton(onClick = {
                                 current = current.parentFile ?: root
                                 searchOn = false
@@ -547,37 +670,148 @@ fun FileBrowser() {
                         }
                     },
                     actions = {
-                        val c = clip
-                        if (c != null) {
-                            TextButton(onClick = {
-                                runOp("Вставка…", "Готово", "Не удалось вставить") {
-                                    pasteInto(c.first, current, c.second)
-                                }
-                                if (c.second) clip = null
-                            }) { Text("Вставить", color = Purple) }
-                        }
-                        IconButton(onClick = { showBookmarks = true }) {
-                            Icon(Icons.Filled.Bookmark, contentDescription = "Закладки")
-                        }
-                        IconButton(onClick = {
-                            if (searchOn) {
-                                searchOn = false
-                                query = ""
-                            } else {
-                                searchOn = true
+                        if (selectionMode) {
+                            IconButton(onClick = { showPackDialog = true }) {
+                                Icon(Icons.Filled.Check, contentDescription = "Запаковать")
                             }
-                        }) {
-                            Icon(
-                                if (searchOn) Icons.Filled.Close else Icons.Filled.Search,
-                                contentDescription = "Поиск"
-                            )
+                            Box {
+                                IconButton(onClick = { overflowOpen = true }) {
+                                    Icon(Icons.Filled.MoreVert, contentDescription = "Ещё")
+                                }
+                                DropdownMenu(
+                                    expanded = overflowOpen,
+                                    onDismissRequest = { overflowOpen = false }
+                                ) {
+                                    val files = selectedFiles()
+                                    val single = files.size == 1
+                                    val singleFile = if (single) files[0] else null
+                                    val singleIsArchive = singleFile != null &&
+                                        !singleFile.isDirectory &&
+                                        singleFile.extension.lowercase() in ARCHIVE_EXT
+
+                                    DropdownMenuItem(
+                                        text = { Text("Запаковать…") },
+                                        onClick = {
+                                            overflowOpen = false
+                                            showPackDialog = true
+                                        }
+                                    )
+                                    if (singleFile != null && singleIsArchive) {
+                                        DropdownMenuItem(
+                                            text = { Text("Посмотреть содержимое") },
+                                            onClick = {
+                                                overflowOpen = false
+                                                val f = singleFile
+                                                exitSelection()
+                                                archive = f
+                                            }
+                                        )
+                                        DropdownMenuItem(
+                                            text = { Text("Распаковать") },
+                                            onClick = {
+                                                overflowOpen = false
+                                                val f = singleFile
+                                                exitSelection()
+                                                runOp("Распаковка…", "Распаковано", "Не удалось распаковать") {
+                                                    unzipArchive(f) != null
+                                                }
+                                            }
+                                        )
+                                    }
+                                    if (singleFile != null && !singleFile.isDirectory) {
+                                        DropdownMenuItem(
+                                            text = { Text("Открыть с помощью…") },
+                                            onClick = {
+                                                overflowOpen = false
+                                                openWithSystem(context, singleFile)
+                                            }
+                                        )
+                                    }
+                                    if (single) {
+                                        DropdownMenuItem(
+                                            text = { Text("Переименовать") },
+                                            onClick = {
+                                                overflowOpen = false
+                                                val f = files[0]
+                                                exitSelection()
+                                                renameText = f.name
+                                                renameFor = f
+                                            }
+                                        )
+                                    }
+                                    DropdownMenuItem(
+                                        text = { Text("Копировать") },
+                                        onClick = {
+                                            overflowOpen = false
+                                            val f = files.first()
+                                            clip = Pair(f, false)
+                                            exitSelection()
+                                            toast("Скопировано. Открой папку и нажми «Вставить»")
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Переместить") },
+                                        onClick = {
+                                            overflowOpen = false
+                                            val f = files.first()
+                                            clip = Pair(f, true)
+                                            exitSelection()
+                                            toast("Выбрано. Открой папку и нажми «Вставить»")
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Удалить") },
+                                        onClick = {
+                                            overflowOpen = false
+                                            if (single) {
+                                                deleteFor = files[0]
+                                                exitSelection()
+                                            } else {
+                                                val targets = files
+                                                exitSelection()
+                                                runOp("Удаление…", "Удалено", "Не удалось удалить") {
+                                                    var ok = true
+                                                    for (t in targets) if (!t.deleteRecursively()) ok = false
+                                                    ok
+                                                }
+                                            }
+                                        }
+                                    )
+                                }
+                            }
+                        } else {
+                            val c = clip
+                            if (c != null) {
+                                TextButton(onClick = {
+                                    runOp("Вставка…", "Готово", "Не удалось вставить") {
+                                        pasteInto(c.first, current, c.second)
+                                    }
+                                    if (c.second) clip = null
+                                }) { Text("Вставить", color = Purple) }
+                            }
+                            IconButton(onClick = { showBookmarks = true }) {
+                                Icon(Icons.Filled.Bookmark, contentDescription = "Закладки")
+                            }
+                            IconButton(onClick = {
+                                if (searchOn) {
+                                    searchOn = false
+                                    query = ""
+                                } else {
+                                    searchOn = true
+                                }
+                            }) {
+                                Icon(
+                                    if (searchOn) Icons.Filled.Close else Icons.Filled.Search,
+                                    contentDescription = "Поиск"
+                                )
+                            }
                         }
                     },
                     colors = barColors()
                 )
             },
             floatingActionButton = {
-                if (!searchOn) {
+                if (!searchOn && !selectionMode) {
                     FloatingActionButton(
                         onClick = {
                             newName = ""
@@ -604,131 +838,89 @@ fun FileBrowser() {
                     modifier = Modifier.fillMaxSize().padding(padding),
                     contentPadding = PaddingValues(bottom = 88.dp)
                 ) {
-                    items(shown, key = { it.file.absolutePath }) { e ->
+                    items(
+                        items = shown,
+                        key = { it.file.absolutePath },
+                        contentType = { if (it.isDir) 0 else 1 }
+                    ) { e ->
+                        val path = e.file.absolutePath
                         ItemRow(
                             title = e.name,
-                            subtitle = e.sub ?: if (e.isDir) null else formatSize(e.size),
+                            subtitle = e.sub ?: e.sizeText,
                             isDir = e.isDir,
+                            isSelected = path in selected,
                             onClick = {
-                                val ext = e.file.extension.lowercase()
-                                if (e.isDir) {
-                                    current = e.file
-                                    searchOn = false
-                                    query = ""
-                                } else if (ext in ARCHIVE_EXT) {
-                                    openWithSystem(context, e.file)
-                                } else if (ext in IMAGE_EXT) {
-                                    image = e.file
-                                } else if (ext in TEXT_EXT || ext.isEmpty()) {
-                                    opened = e.file
+                                if (selectionMode) {
+                                    toggleSelection(path)
                                 } else {
-                                    openWithSystem(context, e.file)
+                                    val ext = e.file.extension.lowercase()
+                                    when {
+                                        e.isDir -> {
+                                            current = e.file
+                                            searchOn = false
+                                            query = ""
+                                        }
+                                        ext in ARCHIVE_EXT -> openWithSystem(context, e.file)
+                                        ext in IMAGE_EXT -> image = e.file
+                                        ext in TEXT_EXT || ext.isEmpty() -> opened = e.file
+                                        else -> openWithSystem(context, e.file)
+                                    }
                                 }
                             },
-                            onLongClick = { menuFor = e }
+                            onLongClick = {
+                                if (!selectionMode) enterSelection(path)
+                                else toggleSelection(path)
+                            }
                         )
                     }
                 }
             }
         }
 
-        // Меню файла / папки
-        val m = menuFor
-        if (m != null) {
-            val isArchive = !m.isDir && m.file.extension.lowercase() in ARCHIVE_EXT
+        // === Диалог упаковки ===
+        if (showPackDialog) {
+            val items = selectedFiles()
             AlertDialog(
-                onDismissRequest = { menuFor = null },
-                title = { Text(m.name, maxLines = 2, overflow = TextOverflow.Ellipsis) },
-                text = {
-                    Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
-                        if (isArchive) {
-                            TextButton(onClick = {
-                                archive = m.file
-                                menuFor = null
-                            }) { Text("Посмотреть содержимое") }
-                            TextButton(onClick = {
-                                menuFor = null
-                                runOp("Распаковка…", "Распаковано", "Не удалось распаковать") {
-                                    unzipArchive(m.file) != null
-                                }
-                            }) { Text("Распаковать") }
-                        }
-                        if (m.isDir) {
-                            TextButton(onClick = {
-                                packFor = m.file
-                                menuFor = null
-                            }) { Text("Запаковать…") }
-                        }
-                        if (!m.isDir) {
-                            TextButton(onClick = {
-                                menuFor = null
-                                openWithSystem(context, m.file)
-                            }) { Text("Открыть с помощью…") }
-                        }
-                        TextButton(onClick = {
-                            renameText = m.name
-                            renameFor = m.file
-                            menuFor = null
-                        }) { Text("Переименовать") }
-                        TextButton(onClick = {
-                            clip = Pair(m.file, false)
-                            menuFor = null
-                            toast("Скопировано. Открой папку и нажми «Вставить»")
-                        }) { Text("Копировать") }
-                        TextButton(onClick = {
-                            clip = Pair(m.file, true)
-                            menuFor = null
-                            toast("Выбрано. Открой папку и нажми «Вставить»")
-                        }) { Text("Переместить") }
-                        TextButton(onClick = {
-                            deleteFor = m.file
-                            menuFor = null
-                        }) { Text("Удалить") }
-                    }
-                },
-                confirmButton = {},
-                dismissButton = { TextButton(onClick = { menuFor = null }) { Text("Отмена") } }
-            )
-        }
-
-        // Выбор формата упаковки
-        val pf = packFor
-        if (pf != null) {
-            AlertDialog(
-                onDismissRequest = { packFor = null },
-                title = { Text("Запаковать «" + pf.name + "»", maxLines = 2, overflow = TextOverflow.Ellipsis) },
+                onDismissRequest = { showPackDialog = false },
+                title = { Text("Запаковать ${items.size} эл.") },
                 text = {
                     Column {
                         Text(
-                            "Содержимое папки попадёт в корень архива. JSON-файлы будут проверены.",
+                            "Содержимое выбранных папок будет упаковано. JSON-файлы проверяются.",
                             style = MaterialTheme.typography.bodySmall,
                             modifier = Modifier.padding(bottom = 8.dp)
                         )
                         TextButton(onClick = {
-                            packFor = null
-                            startPack(pf, "mcaddon")
-                        }) { Text(".mcaddon") }
+                            if (validateAndPack(items, "mcaddon")) {
+                                showPackDialog = false
+                                startPack(items, "mcaddon")
+                            }
+                        }) { Text(".mcaddon — 2+ папки") }
                         TextButton(onClick = {
-                            packFor = null
-                            startPack(pf, "mcpack")
-                        }) { Text(".mcpack") }
+                            if (validateAndPack(items, "mcpack")) {
+                                showPackDialog = false
+                                startPack(items, "mcpack")
+                            }
+                        }) { Text(".mcpack — ровно 1 папка") }
                         TextButton(onClick = {
-                            packFor = null
-                            startPack(pf, "zip")
-                        }) { Text(".zip") }
+                            if (validateAndPack(items, "zip")) {
+                                showPackDialog = false
+                                startPack(items, "zip")
+                            }
+                        }) { Text(".zip — что угодно") }
                     }
                 },
                 confirmButton = {},
-                dismissButton = { TextButton(onClick = { packFor = null }) { Text("Отмена") } }
+                dismissButton = { TextButton(onClick = { showPackDialog = false }) { Text("Отмена") } }
             )
         }
 
-        // Ошибки JSON перед упаковкой
+        // === Ошибки JSON перед упаковкой ===
         val pj = packJob
         if (pj != null) {
             AlertDialog(
                 onDismissRequest = { packJob = null },
-                title = { Text("Ошибки в JSON: " + pj.errors.size) },
+                title = { Text("Ошибки в JSON: ${pj.errors.size}") },
                 text = {
                     Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
                         for (e in pj.errors.take(10)) {
@@ -739,21 +931,22 @@ fun FileBrowser() {
                             )
                         }
                         if (pj.errors.size > 10) {
-                            Text("…и ещё " + (pj.errors.size - 10), style = MaterialTheme.typography.bodySmall)
+                            Text("…и ещё ${pj.errors.size - 10}", style = MaterialTheme.typography.bodySmall)
                         }
                     }
                 },
                 confirmButton = {
                     TextButton(onClick = {
+                        val job = pj
                         packJob = null
-                        doPack(pj.dir, pj.ext)
+                        doPack(job.items, job.ext)
                     }) { Text("Всё равно запаковать") }
                 },
                 dismissButton = { TextButton(onClick = { packJob = null }) { Text("Отмена") } }
             )
         }
 
-        // Закладки
+        // === Закладки ===
         if (showBookmarks) {
             AlertDialog(
                 onDismissRequest = { showBookmarks = false },
@@ -819,7 +1012,7 @@ fun FileBrowser() {
             )
         }
 
-        // Создание
+        // === Создание ===
         if (showCreate) {
             AlertDialog(
                 onDismissRequest = { showCreate = false },
@@ -843,7 +1036,7 @@ fun FileBrowser() {
             )
         }
 
-        // Переименование
+        // === Переименование ===
         val rf = renameFor
         if (rf != null) {
             AlertDialog(
@@ -875,17 +1068,18 @@ fun FileBrowser() {
             )
         }
 
-        // Удаление
+        // === Удаление ===
         val df = deleteFor
         if (df != null) {
             AlertDialog(
                 onDismissRequest = { deleteFor = null },
-                title = { Text("Удалить «" + df.name + "»?") },
+                title = { Text("Удалить «${df.name}»?") },
                 text = { Text("Это действие нельзя отменить.") },
                 confirmButton = {
                     TextButton(onClick = {
+                        val f = df
                         deleteFor = null
-                        runOp(null, "Удалено", "Не удалось удалить") { df.deleteRecursively() }
+                        runOp(null, "Удалено", "Не удалось удалить") { f.deleteRecursively() }
                     }) { Text("Удалить") }
                 },
                 dismissButton = { TextButton(onClick = { deleteFor = null }) { Text("Отмена") } }
@@ -900,16 +1094,20 @@ fun ItemRow(
     title: String,
     subtitle: String?,
     isDir: Boolean,
+    isSelected: Boolean = false,
     onClick: () -> Unit,
     onLongClick: () -> Unit = {}
 ) {
     val shape = RoundedCornerShape(10.dp)
+    val borderColor = if (isSelected) PurpleLight else Purple
+    val bgColor = if (isSelected) Color(0xFF2A1740) else Color.Transparent
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 10.dp, vertical = 4.dp)
             .clip(shape)
-            .border(BorderStroke(1.dp, Purple), shape)
+            .background(bgColor)
+            .border(BorderStroke(if (isSelected) 2.dp else 1.dp, borderColor), shape)
             .combinedClickable(onClick = onClick, onLongClick = onLongClick)
             .padding(horizontal = 12.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically
