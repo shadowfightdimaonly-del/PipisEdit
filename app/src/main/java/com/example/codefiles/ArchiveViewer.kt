@@ -102,7 +102,11 @@ fun ArchiveViewer(archive: File, onBack: () -> Unit) {
 
     val shown = viewing
     if (shown != null) {
-        FileViewer(file = shown, onBack = { viewing = null }, editable = false)
+        if (shown.extension.lowercase() in IMAGE_EXT) {
+            ImageViewer(file = shown, onBack = { viewing = null })
+        } else {
+            FileViewer(file = shown, onBack = { viewing = null }, editable = false)
+        }
     } else {
         fun goUp() {
             if (prefix.isEmpty()) onBack() else prefix = parentPrefix(prefix)
@@ -158,7 +162,7 @@ fun ArchiveViewer(archive: File, onBack: () -> Unit) {
                                     prefix = prefix + node.name + "/"
                                 } else {
                                     val ext = node.name.substringAfterLast('.', "").lowercase()
-                                    if (!(ext in TEXT_EXT || ext.isEmpty())) {
+                                    if (!(ext in TEXT_EXT || ext in IMAGE_EXT || ext.isEmpty())) {
                                         Toast.makeText(
                                             context,
                                             "Этот тип файла внутри архива не открыть. Распакуй архив.",
