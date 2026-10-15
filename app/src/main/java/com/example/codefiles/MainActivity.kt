@@ -490,11 +490,11 @@ fun FileBrowser() {
 
     fun selectedFiles(): List<File> = selected.map { File(it) }
 
-    LaunchedEffect(current) {
-        val list = withContext(Dispatchers.IO) { loadEntries(current) }
-        entries = list
-        loaded = true
-    }
+    LaunchedEffect(current, refresh) {
+    val list = withContext(Dispatchers.IO) { loadEntries(current) }
+    entries = list
+    loaded = true
+}
 
     LaunchedEffect(query, current, searchOn) {
         if (searchOn && query.isNotBlank()) {
