@@ -58,6 +58,31 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import java.io.File
 import java.util.zip.ZipFile
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+
+val Purple = Color(0xFF9C4DFF)
+val PurpleLight = Color(0xFFD0B0FF)
+val PurpleDark = Color(0xFF3A1A66)
+
+val AppColors = darkColorScheme(
+    primary = Purple,
+    onPrimary = Color.Black,
+    background = Color.Black,
+    onBackground = Color(0xFFEDE0FF),
+    surface = Color.Black,
+    onSurface = Color(0xFFEDE0FF),
+    onSurfaceVariant = PurpleLight,
+    surfaceContainerHigh = Color(0xFF14091F),
+    outline = Purple
+)
 
 val ARCHIVE_EXT = setOf("zip", "mcaddon", "mcpack", "mcworld", "mctemplate", "apk", "jar")
 
