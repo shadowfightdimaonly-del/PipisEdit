@@ -53,6 +53,8 @@ private data class ApkReport(
     val entries: List<ApkEntryInfo>,
     val dexNames: List<String>,
     val classNames: List<String>,
+    val methodSummaries: List<String>,
+    val packageInfo: String,
     val manifestNote: String
 )
 
@@ -126,7 +128,8 @@ fun ApkAnalyzerScreen(onBack: () -> Unit) {
                         Text("Размер: ${formatSize(data.totalSize)}")
                         Text("Файлов внутри: ${data.entries.size}")
                         Text("DEX-файлов: ${data.dexNames.size}")
-                        Text("Найдено классов: ${data.classNames.size}")
+                        Text("Найдено классов (показано до 500): ${data.classNames.size}")
+                        Text(data.packageInfo, style = MaterialTheme.typography.bodySmall)
                         Text(data.manifestNote, style = MaterialTheme.typography.bodySmall)
                     }
                 }
@@ -156,6 +159,14 @@ fun ApkAnalyzerScreen(onBack: () -> Unit) {
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         fontSize = 12.sp
                     )
+                }
+                if (data.classNames.isNotEmpty()) {
+                    Text("Классы DEX", style = MaterialTheme.typography.titleMedium, color = PurpleLight)
+                    data.classNames.take(100).forEach { name -> Text(name, fontSize = 12.sp, color = PurpleLight) }
+                    if (data.methodSummaries.isNotEmpty()) {
+                        Text("Методы (первые 200)", style = MaterialTheme.typography.titleMedium, color = PurpleLight)
+                        data.methodSummaries.take(200).forEach { name -> Text(name, fontSize = 11.sp) }
+                    }
                 }
                 Text("Содержимое APK", style = MaterialTheme.typography.titleMedium, color = PurpleLight)
                 LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -197,6 +208,8 @@ private fun inspectApk(context: android.content.Context, uri: Uri): ApkReport {
     val entries = ArrayList<ApkEntryInfo>()
     val dexNames = ArrayList<String>()
     val classes = ArrayList<String>()
+    val methods = ArrayList<String>()
+    var packageInfo = "Информация о пакете недоступна"
     var manifestNote = "AndroidManifest.xml: не найден"
     ZipFile(temp).use { zip ->
         val enumeration = zip.entries()
@@ -229,14 +242,26 @@ private fun inspectApk(context: android.content.Context, uri: Uri): ApkReport {
             FileInputStream(dexTemp).use { input ->
                 val dex = DexBackedDexFile.fromInputStream(Opcodes.getDefault(), input)
                 for (clazz in dex.classes) {
-                    if (classes.size < 500) classes.add(clazz.type.removePrefix("L").removeSuffix(";").replace('/', '.'))
+                    val className = clazz.type.removePrefix("L").removeSuffix(";").replace('/', '.')
+                    if (classes.size < 500) classes.add(className)
+                    if (methods.size < 500) {
+                        for (method in clazz.methods) {
+                            if (methods.size >= 500) break
+                            methods.add("$className -> ${method.name}")
+                        }
+                    }
                 }
             }
             dexTemp.delete()
         }
     }
+    val packageArchive = context.packageManager.getPackageArchiveInfo(temp.absolutePath, android.content.pm.PackageManager.GET_PERMISSIONS)
+    if (packageArchive != null) {
+        val requested = packageArchive.requestedPermissions?.joinToString(", ").orEmpty()
+        packageInfo = "Пакет: ${packageArchive.packageName}\\nВерсия: ${packageArchive.versionName ?: "не указана"}\\nРазрешения: ${requested.ifBlank { "не указаны" }}"
+    }
     entries.sortBy { it.name }
-    return ApkReport(temp.name, temp.length(), entries, dexNames, classes, manifestNote)
+    return ApkReport(temp.name, temp.length(), entries, dexNames, classes, methods, packageInfo, manifestNote)
 }
 
 private fun disassembleApk(context: android.content.Context, report: ApkReport): File {
