@@ -382,6 +382,7 @@ suspend fun searchEntries(base: File, query: String): List<Entry> {
         visited++
         val kids = dir.listFiles() ?: continue
         for (f in kids) {
+            if (f.name == ".PipisEditTrash") continue
             val isDir = f.isDirectory
             if (f.name.lowercase().contains(q)) {
                 val rel = (f.parentFile?.absolutePath ?: "").removePrefix(basePath).ifEmpty { "/" }
