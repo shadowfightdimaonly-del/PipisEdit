@@ -55,6 +55,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 
@@ -419,8 +420,14 @@ private fun sliceRaw(text: String, starts: IntArray, i: Int): String {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun FileViewer(file: File, onBack: () -> Unit, editable: Boolean = true) {
+fun FileViewer(
+    file: File,
+    onBack: () -> Unit,
+    editable: Boolean = true,
+    onSave: (suspend (String) -> Boolean)? = null
+) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val ext = remember(file) { file.extension.lowercase() }
     val isJson = ext == "json" || ext == "mcmeta"
     var doc by remember(file) { mutableStateOf<Doc?>(null) }
@@ -454,23 +461,22 @@ fun FileViewer(file: File, onBack: () -> Unit, editable: Boolean = true) {
         else onBack()
     }
 
-    fun save() {
-        try {
-            file.writeText(editText)
+    suspend fun save() {
+        val saved = withContext(Dispatchers.IO) {
+            try {
+                onSave?.invoke(editText) ?: run { file.writeText(editText); true }
+            } catch (e: Exception) { false }
+        }
+        if (saved) {
             doc = buildDoc(editText, ext)
             editing = false
             Toast.makeText(context, "Сохранено", Toast.LENGTH_SHORT).show()
-        } catch (e: Exception) {
-            Toast.makeText(context, "Не удалось сохранить", Toast.LENGTH_LONG).show()
-        }
+        } else Toast.makeText(context, "Не удалось сохранить", Toast.LENGTH_LONG).show()
     }
 
-    fun trySave() {
+    suspend fun trySave() {
         val err = if (isJson) checkJson(editText) else null
-        if (err != null) {
-            jsonError = err
-            askSaveBad = true
-        } else save()
+        if (err != null) { jsonError = err; askSaveBad = true } else save()
     }
 
     BackHandler { requestBack() }
@@ -517,7 +523,7 @@ fun FileViewer(file: File, onBack: () -> Unit, editable: Boolean = true) {
                 Spacer(modifier = Modifier.weight(1f))
                 if (editable && loaded != null) {
                     if (editing) {
-                        TextButton(onClick = { trySave() }, contentPadding = tight) { Text("Сохранить") }
+                        TextButton(onClick = { scope.launch { trySave() } }, contentPadding = tight) { Text("Сохранить") }
                     } else {
                         TextButton(
                             onClick = {
@@ -594,7 +600,7 @@ fun FileViewer(file: File, onBack: () -> Unit, editable: Boolean = true) {
             confirmButton = {
                 TextButton(onClick = {
                     askSaveBad = false
-                    save()
+                    scope.launch { save() }
                 }) { Text("Сохранить всё равно") }
             },
             dismissButton = { TextButton(onClick = { askSaveBad = false }) { Text("Исправить") } }
