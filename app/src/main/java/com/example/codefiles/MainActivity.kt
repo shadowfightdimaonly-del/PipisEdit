@@ -359,6 +359,7 @@ fun loadEntries(dir: File): List<Entry> {
     val files = dir.listFiles() ?: return emptyList()
     val out = ArrayList<Entry>(files.size)
     for (f in files) {
+        if (f.name == ".PipisEditTrash") continue
         out.add(Entry(f, f.name, f.isDirectory, if (f.isDirectory) 0L else f.length()))
     }
     out.sortWith(
@@ -469,6 +470,8 @@ fun FileBrowser() {
     var packJob by remember { mutableStateOf<PackJob?>(null) }
     var showPackDialog by remember { mutableStateOf(false) }
     var overflowOpen by remember { mutableStateOf(false) }
+    var showTrash by remember { mutableStateOf(false) }
+    var showApkAnalyzer by remember { mutableStateOf(false) }
 
     // === Выделение ===
     val selected = remember { mutableStateListOf<String>() }
@@ -590,7 +593,14 @@ fun FileBrowser() {
     val file = opened
     val img = image
     val arc = archive
-    if (file != null) {
+    if (showApkAnalyzer) {
+        ApkAnalyzerScreen(onBack = { showApkAnalyzer = false })
+    } else if (showTrash) {
+        TrashScreen(
+            onBack = { showTrash = false; refresh++ },
+            onChanged = { refresh++ }
+        )
+    } else if (file != null) {
         FileViewer(file = file, onBack = {
             opened = null
             refresh++
@@ -771,7 +781,7 @@ fun FileBrowser() {
                                                 exitSelection()
                                                 runOp("Удаление…", "Удалено", "Не удалось удалить") {
                                                     var ok = true
-                                                    for (t in targets) if (!t.deleteRecursively()) ok = false
+                                                    for (t in targets) if (!TrashStore.moveToTrash(context, t)) ok = false
                                                     ok
                                                 }
                                             }
@@ -788,6 +798,21 @@ fun FileBrowser() {
                                     }
                                     if (c.second) clip = null
                                 }) { Text("Вставить", color = Purple) }
+                            }
+                            Box {
+                                IconButton(onClick = { overflowOpen = true }) {
+                                    Icon(Icons.Filled.MoreVert, contentDescription = "Инструменты")
+                                }
+                                DropdownMenu(expanded = overflowOpen, onDismissRequest = { overflowOpen = false }) {
+                                    DropdownMenuItem(text = { Text("APK Analyzer") }, onClick = {
+                                        overflowOpen = false
+                                        showApkAnalyzer = true
+                                    })
+                                    DropdownMenuItem(text = { Text("Корзина") }, onClick = {
+                                        overflowOpen = false
+                                        showTrash = true
+                                    })
+                                }
                             }
                             IconButton(onClick = { showBookmarks = true }) {
                                 Icon(Icons.Filled.Bookmark, contentDescription = "Закладки")
@@ -1079,7 +1104,7 @@ fun FileBrowser() {
                     TextButton(onClick = {
                         val f = df
                         deleteFor = null
-                        runOp(null, "Удалено", "Не удалось удалить") { f.deleteRecursively() }
+                        runOp(null, "Удалено", "Не удалось удалить") { TrashStore.moveToTrash(context, f) }
                     }) { Text("Удалить") }
                 },
                 dismissButton = { TextButton(onClick = { deleteFor = null }) { Text("Отмена") } }
