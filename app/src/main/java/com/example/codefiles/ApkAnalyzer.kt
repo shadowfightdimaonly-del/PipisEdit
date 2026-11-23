@@ -235,6 +235,7 @@ private fun inspectApk(context: android.content.Context, uri: Uri): ApkReport {
 
         dexNames.forEach { dexName ->
             val dexEntry = zip.getEntry(dexName) ?: return@forEach
+            require(dexEntry.size <= 96L * 1024 * 1024) { "DEX-файл больше 96 МБ. Чтобы не перегружать телефон, анализ остановлен." }
             val dexTemp = File(context.cacheDir, "inspect-${dexName.replace('/', '_')}")
             zip.getInputStream(dexEntry).use { input ->
                 dexTemp.outputStream().buffered().use { output -> input.copyTo(output, 64 * 1024) }
@@ -258,7 +259,7 @@ private fun inspectApk(context: android.content.Context, uri: Uri): ApkReport {
     val packageArchive = context.packageManager.getPackageArchiveInfo(temp.absolutePath, android.content.pm.PackageManager.GET_PERMISSIONS)
     if (packageArchive != null) {
         val requested = packageArchive.requestedPermissions?.joinToString(", ").orEmpty()
-        packageInfo = "Пакет: ${packageArchive.packageName}\\nВерсия: ${packageArchive.versionName ?: "не указана"}\\nРазрешения: ${requested.ifBlank { "не указаны" }}"
+        packageInfo = "Пакет: ${packageArchive.packageName}\nВерсия: ${packageArchive.versionName ?: "не указана"}\nРазрешения: ${requested.ifBlank { "не указаны" }}"
     }
     entries.sortBy { it.name }
     return ApkReport(temp.name, temp.length(), entries, dexNames, classes, methods, packageInfo, manifestNote)
@@ -274,6 +275,7 @@ private fun disassembleApk(context: android.content.Context, report: ApkReport):
     ZipFile(apk).use { zip ->
         report.dexNames.forEachIndexed { index, name ->
             val entry = zip.getEntry(name) ?: return@forEachIndexed
+            require(entry.size <= 96L * 1024 * 1024) { "DEX-файл больше 96 МБ. Дизассемблирование отменено для защиты памяти телефона." }
             val dexFile = File(context.cacheDir, "disassemble-$index.dex")
             zip.getInputStream(entry).use { input ->
                 dexFile.outputStream().buffered().use { output -> input.copyTo(output, 64 * 1024) }
