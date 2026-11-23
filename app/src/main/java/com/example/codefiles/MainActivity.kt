@@ -1100,13 +1100,13 @@ fun FileBrowser() {
             AlertDialog(
                 onDismissRequest = { deleteFor = null },
                 title = { Text("Удалить «${df.name}»?") },
-                text = { Text("Это действие нельзя отменить.") },
+                text = { Text("Элемент переместится в корзину, откуда его можно будет восстановить.") },
                 confirmButton = {
                     TextButton(onClick = {
                         val f = df
                         deleteFor = null
                         runOp(null, "Удалено", "Не удалось удалить") { TrashStore.moveToTrash(context, f) }
-                    }) { Text("Удалить") }
+                    }) { Text("В корзину") }
                 },
                 dismissButton = { TextButton(onClick = { deleteFor = null }) { Text("Отмена") } }
             )
