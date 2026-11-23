@@ -34,8 +34,13 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.BufferedOutputStream
 import java.io.File
+import java.io.FileOutputStream
+import java.nio.charset.StandardCharsets
+import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
+import java.util.zip.ZipOutputStream
 
 private class ZipNode(val name: String, val isDir: Boolean, val size: Long)
 
@@ -71,6 +76,46 @@ private fun parentPrefix(prefix: String): String {
     return if (i < 0) "" else trimmed.substring(0, i + 1)
 }
 
+private fun replaceZipEntry(archive: File, path: String, updatedText: String): Boolean = try {
+    val temp = File(archive.parentFile, archive.name + ".pipisedit-tmp")
+    var found = false
+    ZipFile(archive).use { source ->
+        ZipOutputStream(BufferedOutputStream(FileOutputStream(temp))).use { output ->
+            val entries = source.entries()
+            while (entries.hasMoreElements()) {
+                val old = entries.nextElement()
+                val replacement = ZipEntry(old.name).apply {
+                    if (old.time >= 0) time = old.time
+                    old.comment?.let { comment = it }
+                }
+                output.putNextEntry(replacement)
+                if (old.name == path) {
+                    found = true
+                    output.write(updatedText.toByteArray(StandardCharsets.UTF_8))
+                } else if (!old.isDirectory) {
+                    source.getInputStream(old).use { it.copyTo(output, 32 * 1024) }
+                }
+                output.closeEntry()
+            }
+        }
+    }
+    if (!found) {
+        temp.delete()
+        false
+    } else {
+        try {
+            android.system.Os.rename(temp.absolutePath, archive.absolutePath)
+            true
+        } catch (e: Exception) {
+            temp.delete()
+            false
+        }
+    }
+} catch (e: Exception) {
+    File(archive.parentFile, archive.name + ".pipisedit-tmp").delete()
+    false
+}
+
 private fun extractEntry(context: Context, archive: File, path: String): File? =
     try {
         ZipFile(archive).use { zip ->
@@ -99,13 +144,19 @@ fun ArchiveViewer(archive: File, onBack: () -> Unit) {
     val entries = remember(archive) { readZipEntries(archive) }
     var prefix by remember { mutableStateOf("") }
     var viewing by remember { mutableStateOf<File?>(null) }
+    var prefixForViewing by remember { mutableStateOf("") }
 
     val shown = viewing
     if (shown != null) {
         if (shown.extension.lowercase() in IMAGE_EXT) {
             ImageViewer(file = shown, onBack = { viewing = null })
         } else {
-            FileViewer(file = shown, onBack = { viewing = null }, editable = false)
+            FileViewer(
+                file = shown,
+                onBack = { viewing = null },
+                editable = shown.extension.lowercase() in TEXT_EXT || shown.extension.isEmpty(),
+                onSave = { updatedText -> replaceZipEntry(archive, prefixForViewing, updatedText) }
+            )
         }
     } else {
         fun goUp() {
@@ -179,6 +230,7 @@ fun ArchiveViewer(archive: File, onBack: () -> Unit) {
                                             if (f == null) {
                                                 Toast.makeText(context, "Не удалось прочитать файл", Toast.LENGTH_LONG).show()
                                             } else {
+                                                prefixForViewing = path
                                                 viewing = f
                                             }
                                         }
