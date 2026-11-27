@@ -42,6 +42,7 @@ import org.jf.dexlib2.Opcodes
 import org.jf.dexlib2.dexbacked.DexBackedDexFile
 import java.io.File
 import java.io.FileInputStream
+import java.io.BufferedInputStream
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
@@ -240,7 +241,7 @@ private fun inspectApk(context: android.content.Context, uri: Uri): ApkReport {
             zip.getInputStream(dexEntry).use { input ->
                 dexTemp.outputStream().buffered().use { output -> input.copyTo(output, 64 * 1024) }
             }
-            FileInputStream(dexTemp).use { input ->
+            BufferedInputStream(FileInputStream(dexTemp)).use { input ->
                 val dex = DexBackedDexFile.fromInputStream(Opcodes.getDefault(), input)
                 for (clazz in dex.classes) {
                     val className = clazz.type.removePrefix("L").removeSuffix(";").replace('/', '.')
@@ -280,7 +281,7 @@ private fun disassembleApk(context: android.content.Context, report: ApkReport):
             zip.getInputStream(entry).use { input ->
                 dexFile.outputStream().buffered().use { output -> input.copyTo(output, 64 * 1024) }
             }
-            FileInputStream(dexFile).use { input ->
+            BufferedInputStream(FileInputStream(dexFile)).use { input ->
                 val dex = DexBackedDexFile.fromInputStream(Opcodes.getDefault(), input)
                 val target = if (index == 0) outDir else File(outDir, "dex_$index").apply { mkdirs() }
                 Baksmali.disassembleDexFile(dex, target, 1, BaksmaliOptions())
